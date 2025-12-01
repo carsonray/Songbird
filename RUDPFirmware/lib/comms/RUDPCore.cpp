@@ -49,9 +49,15 @@ void RUDPCore::Packet::writeByte(uint8_t value) {
 }
 
 void RUDPCore::Packet::writeFloat(float value) {
-    uint8_t buf[sizeof(float)];
-    std::memcpy(buf, &value, sizeof(float));
-    writeBytes(buf, sizeof(float));
+    // Store float in IEEE-754 big-endian byte order
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(float));
+    uint8_t buf[4];
+    buf[0] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+    buf[1] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    buf[2] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    buf[3] = static_cast<uint8_t>(bits & 0xFF);
+    writeBytes(buf, 4);
 }
 
 void RUDPCore::Packet::writeInt16(int16_t data) {
@@ -86,10 +92,14 @@ void RUDPCore::Packet::readBytes(uint8_t* buffer, std::size_t len) {
 }
 
 float RUDPCore::Packet::readFloat() {
-    float v = 0.0f;
-    uint8_t buf[sizeof(float)];
-    readBytes(buf, sizeof(float));
-    std::memcpy(&v, buf, sizeof(float));
+    uint8_t buf[4];
+    readBytes(buf, 4);
+    uint32_t bits = (static_cast<uint32_t>(buf[0]) << 24) |
+                    (static_cast<uint32_t>(buf[1]) << 16) |
+                    (static_cast<uint32_t>(buf[2]) << 8)  |
+                    (static_cast<uint32_t>(buf[3]));
+    float v;
+    std::memcpy(&v, &bits, sizeof(float));
     return v;
 }
 

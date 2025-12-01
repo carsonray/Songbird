@@ -221,6 +221,50 @@ void test_ordering_reliability() {
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[2], "Third header");
 }
 
+void test_integer_payload() {
+    auto cores = makeLinkedCores();
+    auto a = cores.first;
+    auto b = cores.second;
+
+    std::shared_ptr<RUDPCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+        received = pkt;
+    });
+
+    auto p = a->createPacket(0x30);
+    int16_t val = -12345;
+    p.writeInt16(val);
+    a->sendPacket(p);
+
+    b->updateData();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Integer packet received");
+    TEST_ASSERT_EQUAL_INT16_MESSAGE(val, received->readInt16(), "Int16 value mismatch");
+}
+
+void test_float_payload() {
+    auto cores = makeLinkedCores();
+    auto a = cores.first;
+    auto b = cores.second;
+
+    std::shared_ptr<RUDPCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+        received = pkt;
+    });
+
+    auto p = a->createPacket(0x31);
+    float fv = 3.14159f;
+    p.writeFloat(fv);
+    a->sendPacket(p);
+
+    b->updateData();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Float packet received");
+    float got = received->readFloat();
+    // allow small epsilon
+    TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0001f, fv, got, "Float value mismatch");
+}
+
 void setup() {
     UNITY_BEGIN();
     RUN_TEST(test_basic_send_receive);
@@ -228,6 +272,8 @@ void setup() {
     RUN_TEST(test_request_response);
     RUN_TEST(test_reliability_off);
     RUN_TEST(test_ordering_reliability);
+    RUN_TEST(test_integer_payload);
+    RUN_TEST(test_float_payload);
     UNITY_END();
 }
 
