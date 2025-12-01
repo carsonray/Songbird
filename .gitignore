@@ -2,6 +2,10 @@
 .vs/
 .vscode/
 
+# Build results
+[Dd]ebug/
+[Rr]elease/
+
 #nuget Packages folder
 *.nupkg
 RUDPInterface/packages/

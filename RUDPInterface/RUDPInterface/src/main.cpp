@@ -1,8 +1,10 @@
 //Main template (to be implemented later)
 
 #include <iostream>
+#include "gtest/gtest.h"
 
-int main() {
-	std::cout << "RUDP Interface Module" << std::endl;
+int main(int argc, char** argv) {
+	testing::InitGoogleTest(&argc, argv);
+	RUN_ALL_TESTS();
 	return 0;
 }
