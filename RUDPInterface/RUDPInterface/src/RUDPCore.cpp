@@ -1,8 +1,8 @@
-// ...existing code...
 #include "RUDPCore.h"
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 
 using namespace std::chrono_literals;
 
@@ -43,22 +43,30 @@ void RUDPCore::Packet::writeBytes(const uint8_t* buffer, std::size_t length) {
     payload.insert(payload.end(), buffer, buffer + length);
     payloadLength = payload.size();
 }
-
 void RUDPCore::Packet::writeByte(uint8_t value) {
     payload.push_back(value);
     payloadLength = payload.size();
 }
 
 void RUDPCore::Packet::writeFloat(float value) {
-    uint8_t buf[sizeof(float)];
-    std::memcpy(buf, &value, sizeof(float));
-    writeBytes(buf, sizeof(float));
+    // Serialize float as IEEE-754 32-bit big-endian
+    static_assert(sizeof(float) == 4, "Unexpected float size");
+    uint32_t iv = 0;
+    std::memcpy(&iv, &value, sizeof(iv));
+    uint8_t buf[4];
+    buf[0] = static_cast<uint8_t>((iv >> 24) & 0xFF);
+    buf[1] = static_cast<uint8_t>((iv >> 16) & 0xFF);
+    buf[2] = static_cast<uint8_t>((iv >> 8) & 0xFF);
+    buf[3] = static_cast<uint8_t>(iv & 0xFF);
+    writeBytes(buf, sizeof(buf));
 }
 
 void RUDPCore::Packet::writeInt16(int16_t data) {
+    // Serialize 16-bit integer in big-endian (network) byte order
+    uint16_t ud = static_cast<uint16_t>(data);
     uint8_t buf[2];
-    buf[0] = static_cast<uint8_t>(data & 0xFF);
-    buf[1] = static_cast<uint8_t>((data >> 8) & 0xFF);
+    buf[0] = static_cast<uint8_t>((ud >> 8) & 0xFF); // high byte first
+    buf[1] = static_cast<uint8_t>(ud & 0xFF);        // low byte
     writeBytes(buf, 2);
 }
 
@@ -87,18 +95,25 @@ void RUDPCore::Packet::readBytes(uint8_t* buffer, std::size_t len) {
 }
 
 float RUDPCore::Packet::readFloat() {
+    // Deserialize 32-bit IEEE-754 float from big-endian byte order
+    static_assert(sizeof(float) == 4, "Unexpected float size");
+    uint8_t buf[4];
+    readBytes(buf, sizeof(buf));
+    uint32_t iv = (static_cast<uint32_t>(buf[0]) << 24) |
+                  (static_cast<uint32_t>(buf[1]) << 16) |
+                  (static_cast<uint32_t>(buf[2]) << 8) |
+                  (static_cast<uint32_t>(buf[3]));
     float v = 0.0f;
-    uint8_t buf[sizeof(float)];
-    readBytes(buf, sizeof(float));
-    std::memcpy(&v, buf, sizeof(float));
+    std::memcpy(&v, &iv, sizeof(v));
     return v;
 }
 
 int16_t RUDPCore::Packet::readInt16() {
+    // Deserialize 16-bit integer from big-endian byte order
     uint8_t buf[2] = {0,0};
     readBytes(buf, 2);
-    int16_t val = static_cast<int16_t>(static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8));
-    return val;
+    uint16_t uv = (static_cast<uint16_t>(buf[0]) << 8) | static_cast<uint16_t>(buf[1]);
+    return static_cast<int16_t>(uv);
 }
 
 /// RUDPCore implementation
@@ -127,29 +142,37 @@ void RUDPCore::setReadHandler(ReadHandler handler) {
 }
 
 void RUDPCore::setResponseHandler(uint8_t header, ReadHandler handler) {
-    std::lock_guard<std::mutex> lock(responseMutex);
+    std::lock_guard<std::mutex> lock(dataMutex);
     responseHandlers[header] = std::move(handler);
 }
 
 void RUDPCore::clearResponseHandler(uint8_t header) {
-    std::lock_guard<std::mutex> lock(responseMutex);
+    std::lock_guard<std::mutex> lock(dataMutex);
     responseHandlers.erase(header);
+	lastResponseMap.erase(header);
 }
 
-std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForResponse(uint8_t header, uint32_t timeoutMs) {
-    std::unique_lock<std::mutex> lock(responseMutex);
-    // check if we already have a response
-    auto it = lastResponseMap.find(header);
-    if (it != lastResponseMap.end()) {
-        auto pkt = it->second;
-        lastResponseMap.erase(it);
-        return pkt;
+std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForHeader(uint8_t header, uint32_t timeoutMs) {
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+        // check if we already have a response
+        auto it = lastResponseMap.find(header);
+        if (it != lastResponseMap.end()) {
+            auto pkt = it->second;
+            lastResponseMap.erase(it);
+            return pkt;
+        }
     }
     // wait for condition variable to be signalled with that header
-    bool got = responseCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&]() {
-        return lastResponseMap.find(header) != lastResponseMap.end();
-    });
-    if (!got) return nullptr;
+    {
+        std::unique_lock<std::mutex> lock2(waitMutex);
+        bool got = responseCv.wait_for(lock2, std::chrono::milliseconds(timeoutMs), [&]() {
+			std::lock_guard<std::mutex> lock(dataMutex);
+            return lastResponseMap.find(header) != lastResponseMap.end();
+        });
+        if (!got) return nullptr;
+    }
+	std::lock_guard<std::mutex> lock3(dataMutex);
     auto pkt = lastResponseMap[header];
     lastResponseMap.erase(header);
     return pkt;
@@ -189,39 +212,44 @@ bool RUDPCore::isReliabilityEnabled() const {
 
 void RUDPCore::holdPacket(const Packet& packet) {
     std::vector<uint8_t> bytes = packet.toBytes();
-    {
-        std::lock_guard<std::mutex> lock(dataMutex);
-        appendToWriteBuffer(bytes.data(), bytes.size());
-
-        // Clears last response with same header
-        lastResponseMap.erase(packet.getHeader());
-    }
+    appendToWriteBuffer(bytes.data(), bytes.size());
 }
 
 void RUDPCore::sendPacket(const Packet& packet) {
+    std::cout << "(" + name + ") Sending packet: Seq=" << static_cast<int>(packet.getSequenceNum())
+              << " Header=0x" << std::hex << static_cast<int>(packet.getHeader())
+		<< " Len=" << std::dec << static_cast<int>(packet.getPayloadLength()) << "\n";
     holdPacket(packet);
     sendAll();
 }
 
 void RUDPCore::sendAll() {
-    // attempt immediate send if stream available
-    std::shared_ptr<IStream> s = getStream();
-    if (s) {
+    auto s = getStream();
+    if (!s) return;
+
+    // Move current writeBuffer into a heap-allocated vector so its storage
+    // remains valid until the async completion handler runs.
+    std::shared_ptr<std::vector<uint8_t>> outBuf;
+    {
         std::lock_guard<std::mutex> lock(dataMutex);
-        if (!writeBuffer.empty()) {
-			size_t trueBufferSize = writeBuffer.size();
-            s->asyncWrite(writeBuffer.data(), writeBuffer.size(),
-                [this, trueBufferSize](const boost::system::error_code& error, std::size_t bytesTransferred) {
-                    if (error) {
-                        std::cerr << "(" + name + ") Error writing bytes: " << error.message() << std::endl;
-                    }
-                    else if (bytesTransferred < trueBufferSize) {
-                        std::cerr << "(" + name + ") Partial write detected. Ensure all bytes are written." << std::endl;
-                    }
-                });
-            writeBuffer.clear();
-        }
+        if (writeBuffer.empty()) return;
+        outBuf = std::make_shared<std::vector<uint8_t>>(std::move(writeBuffer));
+        // writeBuffer is now in a valid but unspecified (empty) state; we
+        // leave it ready for new data.
+        writeBuffer.clear();
     }
+
+    size_t trueBufferSize = outBuf->size();
+    s->asyncWrite(outBuf->data(), outBuf->size(),
+        [this, outBuf, trueBufferSize](const boost::system::error_code& error, std::size_t bytesTransferred) {
+            (void)outBuf; // keep ownership until handler executes
+            if (error) {
+                std::cerr << "(" + name + ") Error writing bytes: " << error.message() << std::endl;
+            }
+            else if (bytesTransferred < trueBufferSize) {
+                std::cerr << "(" + name + ") Partial write detected. Ensure all bytes are written." << std::endl;
+            }
+        });
 }
 
 void RUDPCore::updateData() {
@@ -234,6 +262,9 @@ void RUDPCore::updateData() {
             std::lock_guard<std::mutex> lock(dataMutex);
             if (!characterizePacket()) break;
             // we have a full packet in readBuffer; construct it
+            std::cout << "(" + name + ") Received packet: Seq=" << static_cast<int>(currSeqNum)
+                      << " Header=0x" << std::hex << static_cast<int>(currHeader)
+				<< " Len=" << std::dec << static_cast<int>(currPayloadLen) << "\n";
 
             std::vector<uint8_t> payload;
             if (currPayloadLen)
@@ -338,18 +369,43 @@ void RUDPCore::updateData() {
 
 void RUDPCore::callHandlers(std::shared_ptr<Packet> pkt) {
     uint8_t header = pkt->getHeader();
-    // Calls a response handler if one exists
-    auto it = responseHandlers.find(header);
-    if (it != responseHandlers.end()) {
-        auto handler = it->second;
-        handler(pkt);
+
+    // Copy response handler and update lastResponseMap under responseMutex
+    ReadHandler responseHandlerCopy;
+    {
+        std::lock_guard<std::mutex> rlock(dataMutex);
+        auto it = responseHandlers.find(header);
+        if (it != responseHandlers.end()) {
+            responseHandlerCopy = it->second;
+        }
+        // update lastResponseMap while holding the same mutex used by waitForResponse
+        lastResponseMap[header] = pkt;
     }
 
-    // Calls general read handler
-    readHandler(pkt);
+    // Call response handler outside of the responseMutex to avoid deadlocks
+    if (responseHandlerCopy) {
+        try {
+            responseHandlerCopy(pkt);
+        }
+        catch (...) {
+            // Swallow exceptions from handlers to avoid terminating the protocol; log if desired.
+        }
+    }
 
-    // Updates last response map
-    lastResponseMap[header] = pkt;
+    // Copy general readHandler under dataMutex, then call it outside the lock
+    ReadHandler generalHandlerCopy;
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+        generalHandlerCopy = readHandler;
+    }
+    if (generalHandlerCopy) {
+        try {
+            generalHandlerCopy(pkt);
+        }
+        catch (...) {
+            // Swallow exceptions from handlers to avoid terminating the protocol; log if desired.
+        }
+    }
 }
 
 void RUDPCore::flush() {
@@ -357,10 +413,8 @@ void RUDPCore::flush() {
     readBuffer.clear();
     writeBuffer.clear();
     incomingPackets.clear();
-    {
-        std::lock_guard<std::mutex> rlock(responseMutex);
-        lastResponseMap.clear();
-    }
+    lastResponseMap.clear();
+    newPacket = true;
 }
 
 std::size_t RUDPCore::getReadBufferSize() {
@@ -391,11 +445,13 @@ bool RUDPCore::characterizePacket() {
 }
 
 void RUDPCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {
+	std::lock_guard<std::mutex> lock(dataMutex);
     if (length == 0) return;
     readBuffer.insert(readBuffer.end(), data, data + length);
 }
 
 void RUDPCore::appendToWriteBuffer(const uint8_t* data, std::size_t length) {
+	std::lock_guard<std::mutex> lock(dataMutex);
     if (length == 0) return;
     writeBuffer.insert(writeBuffer.end(), data, data + length);
 }

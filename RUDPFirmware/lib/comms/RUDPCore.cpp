@@ -48,23 +48,35 @@ void RUDPCore::Packet::writeByte(uint8_t value) {
     payloadLength = payload.size();
 }
 
-void RUDPCore::Packet::writeFloat(float value) {
-    // Store float in IEEE-754 big-endian byte order
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(float));
-    uint8_t buf[4];
-    buf[0] = static_cast<uint8_t>((bits >> 24) & 0xFF);
-    buf[1] = static_cast<uint8_t>((bits >> 16) & 0xFF);
-    buf[2] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-    buf[3] = static_cast<uint8_t>(bits & 0xFF);
-    writeBytes(buf, 4);
+void writeInt16(std::vector<uint8_t>& out, int16_t v) {
+    uint16_t u = static_cast<uint16_t>(v);
+    out.push_back(static_cast<uint8_t>((u >> 8) & 0xFF)); // high byte
+    out.push_back(static_cast<uint8_t>(u & 0xFF));        // low byte
 }
 
-void RUDPCore::Packet::writeInt16(int16_t data) {
-    uint8_t buf[2];
-    buf[0] = static_cast<uint8_t>(data & 0xFF);
-    buf[1] = static_cast<uint8_t>((data >> 8) & 0xFF);
-    writeBytes(buf, 2);
+void writeFloat(std::vector<uint8_t>& out, float f) {
+    static_assert(sizeof(float) == 4, "float must be 4 bytes");
+    uint32_t u = 0;
+    std::memcpy(&u, &f, sizeof(u));
+    out.push_back(static_cast<uint8_t>((u >> 24) & 0xFF));
+    out.push_back(static_cast<uint8_t>((u >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(u & 0xFF));
+}
+
+int16_t readInt16(const uint8_t* b) {
+    uint16_t u = (static_cast<uint16_t>(b[0]) << 8) | static_cast<uint16_t>(b[1]);
+    return static_cast<int16_t>(u);
+}
+
+float readFloat(const uint8_t* b) {
+    uint32_t u = (static_cast<uint32_t>(b[0]) << 24) |
+                 (static_cast<uint32_t>(b[1]) << 16) |
+                 (static_cast<uint32_t>(b[2]) << 8) |
+                 (static_cast<uint32_t>(b[3]));
+    float f;
+    std::memcpy(&f, &u, sizeof(f));
+    return f;
 }
 
 uint8_t RUDPCore::Packet::readByte() {
@@ -106,7 +118,7 @@ float RUDPCore::Packet::readFloat() {
 int16_t RUDPCore::Packet::readInt16() {
     uint8_t buf[2] = {0,0};
     readBytes(buf, 2);
-    int16_t val = static_cast<int16_t>(static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8));
+    int16_t val = static_cast<int16_t>(static_cast<uint16_t>(buf[1]) | (static_cast<uint16_t>(buf[0]) << 8));
     return val;
 }
 
@@ -118,7 +130,6 @@ RUDPCore::RUDPCore(std::string name)
 {
     // initialize spinlocks
     dataSpinlock = portMUX_INITIALIZER_UNLOCKED;
-    responseSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
     // reliability enabled by default
     {
@@ -142,19 +153,20 @@ void RUDPCore::setReadHandler(ReadHandler handler) {
 }
 
 void RUDPCore::setResponseHandler(uint8_t header, ReadHandler handler) {
-    SpinLockGuard guard(responseSpinlock);
+    SpinLockGuard guard(dataSpinlock);
     responseHandlers[header] = std::move(handler);
 }
 
 void RUDPCore::clearResponseHandler(uint8_t header) {
-    SpinLockGuard guard(responseSpinlock);
+    SpinLockGuard guard(dataSpinlock);
     responseHandlers.erase(header);
+    lastResponseMap.erase(header);
 }
 
-std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForResponse(uint8_t header, uint32_t timeoutMs) {
+std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForHeader(uint8_t header, uint32_t timeoutMs) {
     // First check if a response is already available
     {
-        SpinLockGuard guard(responseSpinlock);
+        SpinLockGuard guard(dataSpinlock);
         auto it = lastResponseMap.find(header);
         if (it != lastResponseMap.end()) {
             auto pkt = it->second;
@@ -165,8 +177,10 @@ std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForResponse(uint8_t header, uint
 
     unsigned long start = millis();
     while ((millis() - start) < timeoutMs) {
+        // Updates data
+        updateData();
         {
-            SpinLockGuard guard(responseSpinlock);
+            SpinLockGuard guard(dataSpinlock);
             auto it = lastResponseMap.find(header);
             if (it != lastResponseMap.end()) {
                 auto pkt = it->second;
@@ -213,15 +227,7 @@ bool RUDPCore::isReliabilityEnabled() const {
 
 void RUDPCore::holdPacket(const Packet& packet) {
     std::vector<uint8_t> bytes = packet.toBytes();
-    {
-        SpinLockGuard guard(dataSpinlock);
-        appendToWriteBuffer(bytes.data(), bytes.size());
-    }
-    // Clears last response with same header
-    {
-        SpinLockGuard rguard(responseSpinlock);
-        lastResponseMap.erase(packet.getHeader());
-    }
+    appendToWriteBuffer(bytes.data(), bytes.size());
 }
 
 void RUDPCore::sendPacket(const Packet& packet) {
@@ -241,6 +247,7 @@ void RUDPCore::sendAll() {
                 writeBuffer.clear();
             }
         }
+
         if (!localBuf.empty()) {
             s->write(localBuf.data(), localBuf.size());
         }
@@ -257,7 +264,6 @@ void RUDPCore::updateData() {
             std::vector<uint8_t> tmp(avail);
             std::size_t got = s->read(tmp.data(), avail);
             if (got > 0) {
-                SpinLockGuard guard(dataSpinlock);
                 appendToReadBuffer(tmp.data(), got);
             }
         }
@@ -378,17 +384,13 @@ void RUDPCore::callHandlers(std::shared_ptr<Packet> pkt) {
     uint8_t header = pkt->getHeader();
     // Lookup and store handlers under locks, but invoke them outside locks
     ReadHandler respHandler = nullptr;
+    ReadHandler globalHandler = nullptr;
     {
-        SpinLockGuard guard(responseSpinlock);
+        SpinLockGuard guard(dataSpinlock);
         auto it = responseHandlers.find(header);
         if (it != responseHandlers.end()) respHandler = it->second;
         // update last response map
         lastResponseMap[header] = pkt;
-    }
-
-    ReadHandler globalHandler = nullptr;
-    {
-        SpinLockGuard guard(dataSpinlock);
         globalHandler = readHandler;
     }
 
@@ -402,10 +404,8 @@ void RUDPCore::flush() {
         readBuffer.clear();
         writeBuffer.clear();
         incomingPackets.clear();
-    }
-    {
-        SpinLockGuard rguard(responseSpinlock);
         lastResponseMap.clear();
+        newPacket = true;
     }
 }
 
@@ -437,11 +437,13 @@ bool RUDPCore::characterizePacket() {
 }
 
 void RUDPCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {
+    SpinLockGuard guard(dataSpinlock);
     if (length == 0) return;
     readBuffer.insert(readBuffer.end(), data, data + length);
 }
 
 void RUDPCore::appendToWriteBuffer(const uint8_t* data, std::size_t length) {
+    SpinLockGuard guard(dataSpinlock);
     if (length == 0) return;
     writeBuffer.insert(writeBuffer.end(), data, data + length);
 }

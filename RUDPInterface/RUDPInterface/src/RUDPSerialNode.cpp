@@ -1,11 +1,12 @@
 #include "RUDPSerialNode.h"
 #include <vector>
 
-RUDPSerialNode::RUDPSerialNode(std::string name,
-                               boost::asio::io_context& io_context,
-                               const std::string& device)
-    : io_context_(io_context), device_(device), protocol(std::make_shared<RUDPCore>(name)) {
+RUDPSerialNode::RUDPSerialNode(std::string name)
+    : serialStream(std::make_shared<SerialStream>(std::make_shared<boost::asio::serial_port>(ioContext))),
+    protocol(std::make_shared<RUDPCore>(name))
+{
     protocol->setMissingPacketTimeout(10);
+	protocol->setReliabilityEnabled(true);
 }
 
 RUDPSerialNode::~RUDPSerialNode() {
@@ -14,57 +15,42 @@ RUDPSerialNode::~RUDPSerialNode() {
 
 static void startAsyncReadLoop(std::shared_ptr<SerialStream> stream, std::shared_ptr<RUDPCore> protocol, std::atomic<bool>& active);
 
-bool RUDPSerialNode::begin(unsigned int baudRate) {
-    // create serial_port
-    serialPort_ = std::make_shared<boost::asio::serial_port>(io_context_);
-    boost::system::error_code ec;
-    serialPort_->open(device_, ec);
-    if (ec) return false;
-    serialPort_->set_option(boost::asio::serial_port_base::baud_rate(static_cast<unsigned int>(baudRate)), ec);
-    if (ec) {
-        serialPort_->close();
+bool RUDPSerialNode::begin(const std::string& port, unsigned int baudRate) {
+    try {
+        auto serialPort = serialStream->getSerialPort();
+        serialPort->open(port);
+        serialPort->set_option(boost::asio::serial_port_base::baud_rate(baudRate));
+        serialPort->set_option(boost::asio::serial_port_base::character_size(8));
+        serialPort->set_option(boost::asio::serial_port_base::parity(boost::asio::serial_port_base::parity::none));
+        serialPort->set_option(boost::asio::serial_port_base::stop_bits(boost::asio::serial_port_base::stop_bits::one));
+        serialPort->set_option(boost::asio::serial_port_base::flow_control(boost::asio::serial_port_base::flow_control::none));
+
+        // Attach the async serial stream to protocol so protocol can use it for writes
+        protocol->attachStream(serialStream);
+
+        // Start io thread
+        ioThread = std::thread([this]() { ioContext.run(); });
+
+        // start async read loop to notify protocol when data arrives
+        asyncActive.store(true);
+        startAsyncReadLoop(serialStream, protocol, asyncActive);
+        return true;
+    }
+    catch (boost::system::system_error& e) {
+        std::cerr << "Error opening serial port: " << e.what() << std::endl;
         return false;
     }
-
-    // construct async wrapper SerialStream which uses shared_ptr<serial_port>
-    serialStream = std::make_shared<SerialStream>(serialPort_);
-
-    // Attach the async serial stream to protocol so protocol can use it for writes
-    protocol->attachStream(serialStream);
-
-    // start io_context thread
-    if (!ioThread_) {
-        ioThread_ = std::make_unique<std::thread>([this]() {
-            try {
-                io_context_.run();
-            } catch (...) {
-            }
-        });
-    }
-
-    // start async read loop to notify protocol when data arrives
-    asyncActive.store(true);
-    startAsyncReadLoop(serialStream, protocol, asyncActive);
-
-    return true;
-}
-
-void RUDPSerialNode::updateDate() {
-    protocol->updateData();
 }
 
 void RUDPSerialNode::end() {
     asyncActive.store(false);
-    if (serialStream) serialStream->close();
-    if (serialPort_ && serialPort_->is_open()) {
-        boost::system::error_code ec;
-        serialPort_->cancel(ec);
-        serialPort_->close(ec);
+    if (serialStream && serialStream->isOpen()) {
+        serialStream->close();
     }
-    io_context_.stop();
-    if (ioThread_ && ioThread_->joinable()) {
-        ioThread_->join();
-        ioThread_.reset();
+
+    ioContext.stop();
+    if (ioThread.joinable()) {
+        ioThread.join();
     }
 }
 
@@ -73,7 +59,7 @@ std::shared_ptr<RUDPCore> RUDPSerialNode::getProtocol() {
 }
 
 bool RUDPSerialNode::isOpen() const {
-    return serialPort_ && serialPort_->is_open();
+    return serialStream && serialStream->isOpen();
 }
 
 static const std::size_t ASYNC_READ_BUF = 512;
@@ -86,8 +72,10 @@ static void startAsyncReadLoop(std::shared_ptr<SerialStream> stream, std::shared
     stream->asyncRead(buf->data(), buf->size(), [stream, protocol, buf, &active](const boost::system::error_code& ec, std::size_t bytesTransferred) {
         if (!active.load()) return;
         if (!ec && bytesTransferred > 0) {
-            // Let the protocol pull data from the stream in its updateData call
-            // The serialStream implementation should make the data available via its read()/available() if required.
+            // Append received data to protocol read buffer
+            protocol->appendToReadBuffer(buf->data(), bytesTransferred);
+
+            // Let the protocol pull data in its updateData call
             protocol->updateData();
         }
 

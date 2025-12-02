@@ -1,7 +1,8 @@
 #include "RUDPSerialNode.h"
 
 RUDPSerialNode::RUDPSerialNode(std::string name)
-    : protocol(std::make_shared<RUDPCore>(name)) {
+    : protocol(std::make_shared<RUDPCore>(name)),
+      serialStream(std::make_shared<SerialStream>()){
         protocol->setMissingPacketTimeout(10);
 }
 
@@ -13,10 +14,6 @@ bool RUDPSerialNode::begin(unsigned int baudRate) {
     Serial.begin(baudRate);
     protocol->attachStream(serialStream);
     return true;
-}
-
-void RUDPSerialNode::updateDate() {
-    protocol->updateData();
 }
 
 void RUDPSerialNode::end() {

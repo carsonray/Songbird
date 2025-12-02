@@ -8,7 +8,7 @@
 
 class SerialStream : public IStream {
 public:
-    explicit SerialStream();
+    SerialStream();
 
     void write(const uint8_t* buffer, std::size_t length) override;
     std::size_t read(uint8_t* buffer, std::size_t length) override;

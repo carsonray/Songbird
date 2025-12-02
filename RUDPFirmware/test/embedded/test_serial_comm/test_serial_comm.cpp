@@ -152,12 +152,12 @@ void test_request_response() {
     // A receives response
     a->updateData();
 
-    auto resp = a->waitForResponse(RESP, 1000);
+    auto resp = a->waitForHeader(RESP, 1000);
     TEST_ASSERT_NOT_NULL_MESSAGE(resp.get(), "A should receive a response");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x99, resp->readByte(), "Response payload");
 
     // Extra: test waitForResponse timeout
-    auto resp2 = a->waitForResponse(0xFF, 100);
+    auto resp2 = a->waitForHeader(0xFF, 100);
     TEST_ASSERT_NULL_MESSAGE(resp2.get(), "Should timeout waiting for nonexistent response");
 }
 

@@ -11,16 +11,11 @@
 
 class RUDPSerialNode {
 public:
-    RUDPSerialNode(std::string name,
-                   boost::asio::io_context& io_context,
-                   const std::string& device);
+    RUDPSerialNode(std::string name);
     ~RUDPSerialNode();
 
     // Initialize and open the serial port
-    bool begin(unsigned int baudRate);
-
-    // Updates protocol data
-    void updateDate();
+    bool begin(const std::string& port, unsigned int baudRate);
 
     // Close the serial port
     void end();
@@ -32,17 +27,12 @@ public:
     bool isOpen() const;
 
 private:
-    boost::asio::io_context& io_context_;
-    std::unique_ptr<std::thread> ioThread_;
-
-    std::string device_;
-    std::shared_ptr<boost::asio::serial_port> serialPort_;
-    std::shared_ptr<SerialStream> serialStream; // async template wrapper
-
-    std::shared_ptr<IStream> bufferedStream; // sync stream attached to protocol
-
+    boost::asio::io_context ioContext;
+    std::shared_ptr<SerialStream> serialStream;
     std::shared_ptr<RUDPCore> protocol;
+    std::thread ioThread;
+
     std::atomic<bool> asyncActive{false};
 };
 
-#endif // MINBIT_SERIAL_NODE_H
+#endif // RUDP_SERIAL_NODE_H

@@ -15,9 +15,6 @@ public:
     // Initialize and open the serial port
     bool begin(unsigned int baudRate);
 
-    // Updates protocol data
-    void updateDate();
-
     // Close the serial port
     void end();
 

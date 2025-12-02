@@ -76,7 +76,7 @@ class RUDPCore {
         void clearResponseHandler(uint8_t header);
 
         // Blocking wait for a response packet with the given header (returns nullptr on timeout)
-        std::shared_ptr<Packet> waitForResponse(uint8_t header, uint32_t timeoutMs);
+        std::shared_ptr<Packet> waitForHeader(uint8_t header, uint32_t timeoutMs);
 
         // Gets stream object
         std::shared_ptr<IStream> getStream();
@@ -109,6 +109,10 @@ class RUDPCore {
 
         std::size_t getReadBufferSize();
         std::size_t getWriteBufferSize();
+
+        // Buffer management
+        void appendToReadBuffer(const uint8_t* data, std::size_t length);
+        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
 
     private:
         std::string name;
@@ -149,20 +153,16 @@ class RUDPCore {
         void callHandlers(std::shared_ptr<Packet> pkt);
 
         mutable std::mutex dataMutex;
+        mutable std::mutex waitMutex;
 
         //Read handler (global)
         ReadHandler readHandler;
 
         // Response handlers keyed by header
         std::unordered_map<uint8_t, ReadHandler> responseHandlers;
-        std::mutex responseMutex;
         std::condition_variable_any responseCv;
         // last response packet received per header (for waitForResponse)
         std::unordered_map<uint8_t, std::shared_ptr<RUDPCore::Packet>> lastResponseMap;
-
-        // Buffer management
-        void appendToReadBuffer(const uint8_t* data, std::size_t length);
-        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
 };
 
 template <typename T>
