@@ -141,40 +141,40 @@ void RUDPCore::setReadHandler(ReadHandler handler) {
     readHandler = std::move(handler);
 }
 
-void RUDPCore::setResponseHandler(uint8_t header, ReadHandler handler) {
+void RUDPCore::setSpecificHandler(uint8_t header, ReadHandler handler) {
     std::lock_guard<std::mutex> lock(dataMutex);
-    responseHandlers[header] = std::move(handler);
+    specificHandlers[header] = std::move(handler);
 }
 
-void RUDPCore::clearResponseHandler(uint8_t header) {
+void RUDPCore::clearSpecificHandler(uint8_t header) {
     std::lock_guard<std::mutex> lock(dataMutex);
-    responseHandlers.erase(header);
-	lastResponseMap.erase(header);
+    specificHandlers.erase(header);
+	lastHeaderMap.erase(header);
 }
 
 std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForHeader(uint8_t header, uint32_t timeoutMs) {
     {
         std::lock_guard<std::mutex> lock(dataMutex);
-        // check if we already have a response
-        auto it = lastResponseMap.find(header);
-        if (it != lastResponseMap.end()) {
+        // check if we already have a header
+        auto it = lastHeaderMap.find(header);
+        if (it != lastHeaderMap.end()) {
             auto pkt = it->second;
-            lastResponseMap.erase(it);
+            lastHeaderMap.erase(it);
             return pkt;
         }
     }
     // wait for condition variable to be signalled with that header
     {
         std::unique_lock<std::mutex> lock2(waitMutex);
-        bool got = responseCv.wait_for(lock2, std::chrono::milliseconds(timeoutMs), [&]() {
+        bool got = waitCv.wait_for(lock2, std::chrono::milliseconds(timeoutMs), [&]() {
 			std::lock_guard<std::mutex> lock(dataMutex);
-            return lastResponseMap.find(header) != lastResponseMap.end();
+            return lastHeaderMap.find(header) != lastHeaderMap.end();
         });
         if (!got) return nullptr;
     }
 	std::lock_guard<std::mutex> lock3(dataMutex);
-    auto pkt = lastResponseMap[header];
-    lastResponseMap.erase(header);
+    auto pkt = lastHeaderMap[header];
+    lastHeaderMap.erase(header);
     return pkt;
 }
 
@@ -370,32 +370,32 @@ void RUDPCore::updateData() {
 void RUDPCore::callHandlers(std::shared_ptr<Packet> pkt) {
     uint8_t header = pkt->getHeader();
 
-    // Copy response handler and update lastResponseMap under responseMutex
-    ReadHandler responseHandlerCopy;
+    // Copy specific handler and update lastHeaderMap
+    ReadHandler specificHandlerCopy;
     {
         std::lock_guard<std::mutex> rlock(dataMutex);
-        auto it = responseHandlers.find(header);
-        if (it != responseHandlers.end()) {
-            responseHandlerCopy = it->second;
+        auto it = specificHandlers.find(header);
+        if (it != specificHandlers.end()) {
+            specificHandlerCopy = it->second;
         }
-        // update lastResponseMap while holding the same mutex used by waitForResponse
-        lastResponseMap[header] = pkt;
+        // update lastHeaderMap
+        lastHeaderMap[header] = pkt;
     }
 
-    // Call response handler outside of the responseMutex to avoid deadlocks
-    if (responseHandlerCopy) {
+    // Call specific handler
+    if (specificHandlerCopy) {
         try {
-            responseHandlerCopy(pkt);
+            specificHandlerCopy(pkt);
         }
         catch (...) {
             // Swallow exceptions from handlers to avoid terminating the protocol; log if desired.
         }
     }
 
-    // Notifies waitForHeader
-    responseCv.notify_all();
+    // Notifies waitForHeader threads
+    waitCv.notify_all();
 
-    // Copy general readHandler under dataMutex, then call it outside the lock
+    // Copy general readHandler
     ReadHandler generalHandlerCopy;
     {
         std::lock_guard<std::mutex> lock(dataMutex);
@@ -416,7 +416,7 @@ void RUDPCore::flush() {
     readBuffer.clear();
     writeBuffer.clear();
     incomingPackets.clear();
-    lastResponseMap.clear();
+    lastHeaderMap.clear();
     newPacket = true;
 }
 

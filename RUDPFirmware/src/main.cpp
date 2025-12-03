@@ -78,7 +78,7 @@ static bool run_basic_send_receive() {
 
 static bool run_specific_handler() {
     bool ok = false;
-    interfaceData->setResponseHandler(0x10, [&](std::shared_ptr<RUDPCore::Packet> pkt) {
+    interfaceData->setSpecificHandler(0x10, [&](std::shared_ptr<RUDPCore::Packet> pkt) {
         if (!pkt) return;
         if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
             ok = true;

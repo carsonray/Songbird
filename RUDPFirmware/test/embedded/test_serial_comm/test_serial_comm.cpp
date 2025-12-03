@@ -101,7 +101,7 @@ void test_specific_handler() {
     uint8_t header = 0x10;
 
     std::shared_ptr<RUDPCore::Packet> received;
-    b->setResponseHandler(header, [&](std::shared_ptr<RUDPCore::Packet> pkt){
+    b->setSpecificHandler(header, [&](std::shared_ptr<RUDPCore::Packet> pkt){
         received = pkt;
     });
 

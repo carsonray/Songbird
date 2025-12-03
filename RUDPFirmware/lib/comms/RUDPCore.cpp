@@ -140,25 +140,25 @@ void RUDPCore::setReadHandler(ReadHandler handler) {
     readHandler = std::move(handler);
 }
 
-void RUDPCore::setResponseHandler(uint8_t header, ReadHandler handler) {
+void RUDPCore::setSpecificHandler(uint8_t header, ReadHandler handler) {
     SpinLockGuard guard(dataSpinlock);
-    responseHandlers[header] = std::move(handler);
+    specificHandlers[header] = std::move(handler);
 }
 
-void RUDPCore::clearResponseHandler(uint8_t header) {
+void RUDPCore::clearSpecificHandler(uint8_t header) {
     SpinLockGuard guard(dataSpinlock);
-    responseHandlers.erase(header);
-    lastResponseMap.erase(header);
+    specificHandlers.erase(header);
+    lastHeaderMap.erase(header);
 }
 
 std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForHeader(uint8_t header, uint32_t timeoutMs) {
-    // First check if a response is already available
+    // First check if a header is already available
     {
         SpinLockGuard guard(dataSpinlock);
-        auto it = lastResponseMap.find(header);
-        if (it != lastResponseMap.end()) {
+        auto it = lastHeaderMap.find(header);
+        if (it != lastHeaderMap.end()) {
             auto pkt = it->second;
-            lastResponseMap.erase(it);
+            lastHeaderMap.erase(it);
             return pkt;
         }
     }
@@ -169,10 +169,10 @@ std::shared_ptr<RUDPCore::Packet> RUDPCore::waitForHeader(uint8_t header, uint32
         updateData();
         {
             SpinLockGuard guard(dataSpinlock);
-            auto it = lastResponseMap.find(header);
-            if (it != lastResponseMap.end()) {
+            auto it = lastHeaderMap.find(header);
+            if (it != lastHeaderMap.end()) {
                 auto pkt = it->second;
-                lastResponseMap.erase(it);
+                lastHeaderMap.erase(it);
                 return pkt;
             }
         }
@@ -371,18 +371,18 @@ void RUDPCore::updateData() {
 void RUDPCore::callHandlers(std::shared_ptr<Packet> pkt) {
     uint8_t header = pkt->getHeader();
     // Lookup and store handlers under locks, but invoke them outside locks
-    ReadHandler respHandler = nullptr;
+    ReadHandler specHandler = nullptr;
     ReadHandler globalHandler = nullptr;
     {
         SpinLockGuard guard(dataSpinlock);
-        auto it = responseHandlers.find(header);
-        if (it != responseHandlers.end()) respHandler = it->second;
-        // update last response map
-        lastResponseMap[header] = pkt;
+        auto it = specificHandlers.find(header);
+        if (it != specificHandlers.end()) specHandler = it->second;
+        // update last header map
+        lastHeaderMap[header] = pkt;
         globalHandler = readHandler;
     }
 
-    if (respHandler) respHandler(pkt);
+    if (specHandler) specHandler(pkt);
     if (globalHandler) globalHandler(pkt);
 }
 
@@ -392,7 +392,7 @@ void RUDPCore::flush() {
         readBuffer.clear();
         writeBuffer.clear();
         incomingPackets.clear();
-        lastResponseMap.clear();
+        lastHeaderMap.clear();
         newPacket = true;
     }
 }

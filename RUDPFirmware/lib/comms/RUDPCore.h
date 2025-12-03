@@ -82,8 +82,8 @@ class RUDPCore {
         void setReadHandler(ReadHandler handler);
 
         // Attach a response handler for packets with a particular header
-        void setResponseHandler(uint8_t header, ReadHandler handler);
-        void clearResponseHandler(uint8_t header);
+        void setSpecificHandler(uint8_t header, ReadHandler handler);
+        void clearSpecificHandler(uint8_t header);
 
         // Blocking wait for a response packet with the given header (returns nullptr on timeout)
         std::shared_ptr<Packet> waitForHeader(uint8_t header, uint32_t timeoutMs);
@@ -171,9 +171,9 @@ class RUDPCore {
         ReadHandler readHandler;
 
         // Response handlers keyed by header
-        std::unordered_map<uint8_t, ReadHandler> responseHandlers;
+        std::unordered_map<uint8_t, ReadHandler> specificHandlers;
         // last response packet received per header (for waitForResponse)
-        std::unordered_map<uint8_t, std::shared_ptr<RUDPCore::Packet>> lastResponseMap;
+        std::unordered_map<uint8_t, std::shared_ptr<RUDPCore::Packet>> lastHeaderMap;
 };
 
 template <typename T>

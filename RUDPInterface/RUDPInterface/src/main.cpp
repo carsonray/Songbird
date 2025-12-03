@@ -70,7 +70,7 @@ static bool run_specific_handler() {
     pkt.writeByte(0x42);
     interfaceData->sendPacket(pkt);
 
-    interfaceData->setResponseHandler(0x10, [&](std::shared_ptr<RUDPCore::Packet> pkt) {
+    interfaceData->setSpecificHandler(0x10, [&](std::shared_ptr<RUDPCore::Packet> pkt) {
         if (!pkt) return;
         if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
             ok = true;
@@ -110,25 +110,25 @@ static bool run_request_response() {
 }
 
 static bool run_integer_payload() {
-    auto resp = interfaceData->createPacket(0x30);
-    resp.writeInt16(-12345);
-    interfaceData->sendPacket(resp);
-    auto request = interfaceData->waitForHeader(0x30, 2000);
-    if (!request) return false;
-    if (request->getHeader() != 0x30 || request->getPayloadLength() != 2) return false;
-    int16_t v = request->readInt16();
+    auto req = interfaceData->createPacket(0x30);
+    req.writeInt16(-12345);
+    interfaceData->sendPacket(req);
+    auto resp = interfaceData->waitForHeader(0x30, 2000);
+    if (!resp) return false;
+    if (resp->getHeader() != 0x30 || resp->getPayloadLength() != 2) return false;
+    int16_t v = resp->readInt16();
     if (v != -12345) return false;
     return true;
 }
 
 static bool run_float_payload() {
-    auto resp = interfaceData->createPacket(0x31);
-    resp.writeFloat(3.14159f);
-    interfaceData->sendPacket(resp);
-    auto request = interfaceData->waitForHeader(0x31, 2000);
-    if (!request) return false;
-    if (request->getHeader() != 0x31 || request->getPayloadLength() != 4) return false;
-    float v = request->readFloat();
+    auto req = interfaceData->createPacket(0x31);
+    req.writeFloat(3.14159f);
+    interfaceData->sendPacket(req);
+    auto resp = interfaceData->waitForHeader(0x31, 2000);
+    if (!resp) return false;
+    if (resp->getHeader() != 0x31 || resp->getPayloadLength() != 4) return false;
+    float v = resp->readFloat();
     if (fabs(v - 3.14159f) >= 0.0002f) return false;
     return true;
 }
