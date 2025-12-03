@@ -7,13 +7,44 @@
 #define SERIAL_BAUD 115200
 
 // Simple test runner that mirrors the unit tests but uses the hardware Serial
-// as the transport. Requires wiring TX->RX for loopback or a partner device
-// that echoes/responses. The runner prints PASS/FAIL to Serial.
+
+// RTOS Task Handles
+TaskHandle_t testsTaskHandle = NULL;
+TaskHandle_t updateTaskHandler = NULL;
 
 //Serial node object
 RUDPSerialNode interface("Middleware Interface");
 //Serial server protocol object
 std::shared_ptr<RUDPCore> interfaceData;
+
+// RTOS task function prototypes
+void testsTask(void* pvParameters);
+void updateTask(void* pvParameters);
+
+void setup() {
+  interfaceData = interface.getProtocol();
+  interface.begin(SERIAL_BAUD);
+
+  // Create RTOS tasks with appropriate priorities
+  xTaskCreatePinnedToCore(
+    testsTask,           // Task function
+    "Tests_Task",        // Task name
+    8192,               // Increased stack size
+    NULL,               // Parameters
+    2,                  // Priority (higher = more important)
+    &testsTaskHandle,    // Task handle
+    0                   // Core (0 or 1)
+  );
+  xTaskCreatePinnedToCore(
+    updateTask,         // Task function
+    "Update_Task",      // Task name
+    4096,               // Stack size
+    NULL,               // Parameters
+    1,                  // Priority
+    &updateTaskHandler, // Task handle
+    1                   // Core (0 or 1)
+  );
+}
 
 static void waitForPing()
 {
@@ -40,7 +71,6 @@ static bool run_basic_send_receive() {
 
   unsigned long start = millis();
   while (!ok && millis() - start < 2000) {
-    interfaceData->updateData();
     vTaskDelay(1);
   }
   return ok;
@@ -60,7 +90,6 @@ static bool run_specific_handler() {
 
     unsigned long start = millis();
     while (!ok && millis() - start < 2000) {
-      interfaceData->updateData();
       vTaskDelay(1);
     }
 
@@ -75,7 +104,6 @@ static bool run_specific_handler() {
 
     start = millis();
     while (!ok && millis() - start < 2000) {
-      interfaceData->updateData();
       vTaskDelay(1);
     }
 
@@ -98,7 +126,7 @@ static bool run_request_response() {
 }
 
 static bool run_integer_payload() {
-  auto request = interfaceData->waitForHeader(0x30, 5000);
+  auto request = interfaceData->waitForHeader(0x30, 2000);
   if (!request) return false;
   if (request->getHeader() != 0x30 || request->getPayloadLength() != 2) return false;
   int16_t v = request->readInt16();
@@ -110,7 +138,7 @@ static bool run_integer_payload() {
 }
 
 static bool run_float_payload() {
-  auto request = interfaceData->waitForHeader(0x31, 5000);
+  auto request = interfaceData->waitForHeader(0x31, 2000);
   if (!request) return false;
   if (request->getHeader() != 0x31 || request->getPayloadLength() != 4) return false;
   float v = request->readFloat();
@@ -121,38 +149,43 @@ static bool run_float_payload() {
   return true;
 }
 
-void setup() {
-  interfaceData = interface.getProtocol();
-  interface.begin(SERIAL_BAUD);
-
+void testsTask(void* pvParameters) {
   waitForPing();
 
   bool pass = true;
 
   pass &= run_basic_send_receive();
 
-  delay(200);
+  vTaskDelay(pdMS_TO_TICKS(200));
 
   pass &= run_specific_handler();
 
-  delay(200);
+  vTaskDelay(pdMS_TO_TICKS(200));
 
   pass &= run_request_response();
 
-  delay(200);
+  vTaskDelay(pdMS_TO_TICKS(200));
 
   pass &= run_integer_payload();
 
-  delay(200);
+  vTaskDelay(pdMS_TO_TICKS(200));
   
   pass &= run_float_payload();
 
   auto pkt = interfaceData->createPacket(0x00);
   pkt.writeByte(pass ? 0x01 : 0x00);
   interfaceData->sendPacket(pkt);
+
+  vTaskSuspend(NULL); // Suspend this task
+}
+
+void updateTask(void* pvParameters) {
+  while (true) {
+    interfaceData->updateData();
+    vTaskDelay(1); // Yield to other tasks
+  }
 }
 
 void loop() {
-  // Halt
-  delay(1000);
+  // Nothing to do here, all work is in RTOS tasks
 }

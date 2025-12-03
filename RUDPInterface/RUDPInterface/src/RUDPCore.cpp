@@ -392,6 +392,9 @@ void RUDPCore::callHandlers(std::shared_ptr<Packet> pkt) {
         }
     }
 
+    // Notifies waitForHeader
+    responseCv.notify_all();
+
     // Copy general readHandler under dataMutex, then call it outside the lock
     ReadHandler generalHandlerCopy;
     {
