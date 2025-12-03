@@ -48,35 +48,23 @@ void RUDPCore::Packet::writeByte(uint8_t value) {
     payloadLength = payload.size();
 }
 
-void writeInt16(std::vector<uint8_t>& out, int16_t v) {
-    uint16_t u = static_cast<uint16_t>(v);
-    out.push_back(static_cast<uint8_t>((u >> 8) & 0xFF)); // high byte
-    out.push_back(static_cast<uint8_t>(u & 0xFF));        // low byte
+void RUDPCore::Packet::writeInt16(int16_t data) {
+    uint8_t buf[2];
+    buf[0] = static_cast<uint8_t>((data >> 8) & 0xFF);
+    buf[1] = static_cast<uint8_t>(data & 0xFF);
+    writeBytes(buf, 2);
 }
 
-void writeFloat(std::vector<uint8_t>& out, float f) {
-    static_assert(sizeof(float) == 4, "float must be 4 bytes");
-    uint32_t u = 0;
-    std::memcpy(&u, &f, sizeof(u));
-    out.push_back(static_cast<uint8_t>((u >> 24) & 0xFF));
-    out.push_back(static_cast<uint8_t>((u >> 16) & 0xFF));
-    out.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
-    out.push_back(static_cast<uint8_t>(u & 0xFF));
-}
-
-int16_t readInt16(const uint8_t* b) {
-    uint16_t u = (static_cast<uint16_t>(b[0]) << 8) | static_cast<uint16_t>(b[1]);
-    return static_cast<int16_t>(u);
-}
-
-float readFloat(const uint8_t* b) {
-    uint32_t u = (static_cast<uint32_t>(b[0]) << 24) |
-                 (static_cast<uint32_t>(b[1]) << 16) |
-                 (static_cast<uint32_t>(b[2]) << 8) |
-                 (static_cast<uint32_t>(b[3]));
-    float f;
-    std::memcpy(&f, &u, sizeof(f));
-    return f;
+void RUDPCore::Packet::writeFloat(float value) {
+    // Store float in IEEE-754 big-endian byte order
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(float));
+    uint8_t buf[4];
+    buf[0] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+    buf[1] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    buf[2] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    buf[3] = static_cast<uint8_t>(bits & 0xFF);
+    writeBytes(buf, 4);
 }
 
 uint8_t RUDPCore::Packet::readByte() {

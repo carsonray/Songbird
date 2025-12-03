@@ -100,62 +100,37 @@ static bool run_specific_handler() {
 }
 
 static bool run_request_response() {
-    bool gotResponse = false;
-
-    interfaceData->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt) {
-        if (!pkt) return;
-        if (pkt->getHeader() == 0x01 && pkt->getPayloadLength() >= 1 && pkt->readByte() == 0x99) gotResponse = true;
-        });
-
+    // Sends request packet
     auto req = interfaceData->createPacket(0x01);
     interfaceData->sendPacket(req);
 
-    interfaceData->waitForHeader(0x01, 2000);
-    return gotResponse;
+    // Waits for response packet
+    auto response = interfaceData->waitForHeader(0x01, 2000);
+    return (response && response->getHeader() == 0x01 && response->getPayloadLength() == 1 && response->readByte() == 0x99);
 }
 
 static bool run_integer_payload() {
-    bool ok = false;
-
-    auto p = interfaceData->createPacket(0x30);
-    p.writeInt16(static_cast<int16_t>(-12345));
-    interfaceData->sendPacket(p);
-
-    interfaceData->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt) {
-        if (!pkt) return;
-        if (pkt->getHeader() == 0x30 && pkt->getPayloadLength() == 2) {
-            int16_t v = pkt->readInt16();
-            if (v == -12345) ok = true;
-        }
-        });
-
-    auto start = std::chrono::steady_clock::now();
-    while (!ok && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < 2000) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return ok;
+    auto resp = interfaceData->createPacket(0x30);
+    resp.writeInt16(-12345);
+    interfaceData->sendPacket(resp);
+    auto request = interfaceData->waitForHeader(0x30, 2000);
+    if (!request) return false;
+    if (request->getHeader() != 0x30 || request->getPayloadLength() != 2) return false;
+    int16_t v = request->readInt16();
+    if (v != -12345) return false;
+    return true;
 }
 
 static bool run_float_payload() {
-    bool ok = false;
-
-    auto p = interfaceData->createPacket(0x31);
-    p.writeFloat(3.14159f);
-    interfaceData->sendPacket(p);
-
-    interfaceData->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt) {
-        if (!pkt) return;
-        if (pkt->getHeader() == 0x31 && pkt->getPayloadLength() == 4) {
-            float v = pkt->readFloat();
-            if (std::fabs(v - 3.14159f) < 0.0002f) ok = true;
-        }
-        });
-
-    auto start = std::chrono::steady_clock::now();
-    while (!ok && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < 2000) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return ok;
+    auto resp = interfaceData->createPacket(0x31);
+    resp.writeFloat(3.14159f);
+    interfaceData->sendPacket(resp);
+    auto request = interfaceData->waitForHeader(0x31, 2000);
+    if (!request) return false;
+    if (request->getHeader() != 0x31 || request->getPayloadLength() != 4) return false;
+    float v = request->readFloat();
+    if (fabs(v - 3.14159f) >= 0.0002f) return false;
+    return true;
 }
 
 int main() {
@@ -168,7 +143,7 @@ int main() {
     waitForPing();
 
     bool pass = true;
-
+    
     std::cout << "\nRunning basic send/receive...\n";
     if (run_basic_send_receive()) std::cout << "\nbasic_send_receive: PASS\n"; else { std::cout << "\nbasic_send_receive: FAIL\n"; pass = false; }
 
@@ -179,16 +154,16 @@ int main() {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-    std::cout << "\nRunning request/response test (local echo)...\n";
+    std::cout << "\nRunning request/response test \n";
     if (run_request_response()) std::cout << "\nrequest_response: PASS\n"; else { std::cout << "\nrequest_response: FAIL\n"; pass = false; }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     std::cout << "\nRunning integer payload test...\n";
     if (run_integer_payload()) std::cout << "\ninteger_payload: PASS\n"; else { std::cout << "\ninteger_payload: FAIL\n"; pass = false; }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    
+
     std::cout << "\nRunning float payload test...\n";
     if (run_float_payload()) std::cout << "\nfloat_payload: PASS\n"; else { std::cout << "\nfloat_payload: FAIL\n"; pass = false; }
 

@@ -41,7 +41,7 @@ static bool run_basic_send_receive() {
   unsigned long start = millis();
   while (!ok && millis() - start < 2000) {
     interfaceData->updateData();
-    delay(5);
+    vTaskDelay(1);
   }
   return ok;
 }
@@ -61,7 +61,7 @@ static bool run_specific_handler() {
     unsigned long start = millis();
     while (!ok && millis() - start < 2000) {
       interfaceData->updateData();
-      delay(5);
+      vTaskDelay(1);
     }
 
 	  if (!ok) return false;
@@ -76,72 +76,49 @@ static bool run_specific_handler() {
     start = millis();
     while (!ok && millis() - start < 2000) {
       interfaceData->updateData();
-      delay(5);
+      vTaskDelay(1);
     }
 
     return !ok;
 }
 
 static bool run_request_response() {
-  bool gotRequest = false;
+  // Waits for request
+  auto request = interfaceData->waitForHeader(0x01, 2000);
 
-  // If we receive a REQ, reply with RESP (this simulates the partner)
-  interfaceData->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
-    if (pkt->getHeader() == 0x01 && pkt->getPayloadLength() == 0) {
-      gotRequest = true;
-      auto r = interfaceData->createPacket(0x01);
-      r.writeByte(0x99);
-      interfaceData->sendPacket(r);
-    }
-  });
+  // Checks data
+  bool gotRequest = (request->getHeader() == 0x01 && request->getPayloadLength() == 0);
 
-  std::shared_ptr<RUDPCore::Packet> response = nullptr;
-  while (!response) {
-    interfaceData->waitForHeader(0x01, 1000); // Send request
-    delay(5);
-  }
+  // Sends response
+  auto r = interfaceData->createPacket(0x01);
+  r.writeByte(0x99);
+  interfaceData->sendPacket(r);
 
   return gotRequest;
 }
 
 static bool run_integer_payload() {
-  bool ok = false;
-  interfaceData->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
-    if (pkt->getHeader() == 0x30 && pkt->getPayloadLength() == 2) {
-      int16_t v = pkt->readInt16();
-      if (v == -12345) ok = true;
-      auto p = interfaceData->createPacket(0x30);
-      p.writeInt16(static_cast<int16_t>(-12345));
-      interfaceData->sendPacket(p);
-    }
-  });
-
-  unsigned long start = millis();
-  while (!ok && millis() - start < 2000) {
-    interfaceData->updateData();
-    delay(5);
-  }
-  return ok;
+  auto request = interfaceData->waitForHeader(0x30, 5000);
+  if (!request) return false;
+  if (request->getHeader() != 0x30 || request->getPayloadLength() != 2) return false;
+  int16_t v = request->readInt16();
+  if (v != -12345) return false;
+  auto resp = interfaceData->createPacket(0x30);
+  resp.writeInt16(-12345);
+  interfaceData->sendPacket(resp);
+  return true;
 }
 
 static bool run_float_payload() {
-  bool ok = false;
-  interfaceData->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
-    if (pkt->getHeader() == 0x31 && pkt->getPayloadLength() == 4) {
-      float v = pkt->readFloat();
-      if (fabs(v - 3.14159f) < 0.0002f) ok = true;
-      auto p = interfaceData->createPacket(0x31);
-      p.writeFloat(3.14159f);
-      interfaceData->sendPacket(p);
-    }
-  });
-
-  unsigned long start = millis();
-  while (!ok && millis() - start < 2000) {
-    interfaceData->updateData();
-    delay(5);
-  }
-  return ok;
+  auto request = interfaceData->waitForHeader(0x31, 5000);
+  if (!request) return false;
+  if (request->getHeader() != 0x31 || request->getPayloadLength() != 4) return false;
+  float v = request->readFloat();
+  if (fabs(v - 3.14159f) >= 0.0002f) return false;
+  auto resp = interfaceData->createPacket(0x31);
+  resp.writeFloat(3.14159f);
+  interfaceData->sendPacket(resp);
+  return true;
 }
 
 void setup() {
@@ -169,8 +146,6 @@ void setup() {
   delay(200);
   
   pass &= run_float_payload();
-
-  delay(200);
 
   auto pkt = interfaceData->createPacket(0x00);
   pkt.writeByte(pass ? 0x01 : 0x00);
