@@ -8,7 +8,7 @@
 
 #nuget Packages folder
 *.nupkg
-RUDPInterface/packages/
+[Pp]ackages/
 
 # Gradle cache directory
 .gradle/
