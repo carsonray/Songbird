@@ -33,6 +33,7 @@ class SongbirdCore {
             int64_t getSequenceNum() const;
             uint8_t getHeader() const;
             std::size_t getPayloadLength() const;
+            std::size_t getRemainingBytes() const;
 
             // Writing functions
             void writeBytes(const uint8_t* buffer, std::size_t length);

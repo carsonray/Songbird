@@ -38,6 +38,10 @@ std::size_t SongbirdCore::Packet::getPayloadLength() const {
     return payloadLength;
 }
 
+std::size_t SongbirdCore::Packet::getRemainingBytes() const {
+    return payloadLength - readPos;
+}
+
 void SongbirdCore::Packet::writeBytes(const uint8_t* buffer, std::size_t length) {
     if (length == 0) return;
     payload.insert(payload.end(), buffer, buffer + length);
