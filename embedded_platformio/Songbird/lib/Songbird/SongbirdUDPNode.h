@@ -13,11 +13,26 @@ public:
     SongbirdUDPNode(std::string name);
     ~SongbirdUDPNode() override;
 
-    // Bind to local port
-    bool begin(uint16_t localPort);
+    // Start listen handler
+    bool begin();
+
+    // Sets local port to listen at
+    bool listen(uint16_t port);
+    // Subscribes to multicast
+    void listenMulticast(const IPAddress &addr, uint16_t port);
 
     // Sets remote address and port
     bool setRemote(const IPAddress &addr, uint16_t port);
+    // Sets broadcast mode
+    void setBroadcastMode(bool broadcastMode);
+
+    bool isBroadcast();
+    bool isMulticast();
+
+    IPAddress getRemoteIP();
+    uint16_t getRemotePort();
+    // Gets local port
+    uint16_t getLocalPort();
 
     // IStream interface
     void write(const uint8_t* buffer, std::size_t length) override;
@@ -28,8 +43,11 @@ private:
     std::shared_ptr<SongbirdCore> protocol;
     AsyncUDP udp;
     bool opened;
-    IPAddress remoteAddr;
-    uint16_t remotePort;
+    bool broadcastMode;
+    bool multicastMode;
+    IPAddress remoteIP;
+    IPAddress remotePort;
+    uint16_t localPort;
 };
 
 #endif // UDPSTREAM_H

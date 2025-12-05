@@ -33,6 +33,52 @@ class SongbirdCore {
             PACKET
         };
 
+        struct Remote {
+            IPAddress ip;
+            uint16_t port;
+
+            bool operator==(const Remote& o) const {
+                return ip == o.ip && port == o.port;
+            }
+        };
+
+        struct RemoteExpected {
+            Remote remote;
+            uint8_t expectedSeqNum;
+
+            bool operator==(const RemoteExpected& o) const {
+                return expectedSeqNum == o.expectedSeqNum && remote == o.remote;
+            }
+        };
+        
+        struct RemoteOrder {
+            uint8_t expectedSeqNum;
+            bool missingTimerActive;
+            uint64_t missingSinceMs;
+        };
+
+        // Custom hash functor
+        struct RemoteHasher {
+            size_t operator()(SongbirdCore::Remote const& r) const noexcept {
+                // IPAddress exposes operator[] to access octets
+                uint32_t a = (static_cast<uint32_t>(r.ip[0]) << 24) |
+                            (static_cast<uint32_t>(r.ip[1]) << 16) |
+                            (static_cast<uint32_t>(r.ip[2]) << 8)  |
+                            (static_cast<uint32_t>(r.ip[3]));
+                // combine ip and port into a size_t
+                return std::hash<uint32_t>()(a) ^ (static_cast<size_t>(r.port) << 1);
+            }
+        };
+
+        struct RemoteExpectedHasher {
+            size_t operator()(SongbirdCore::RemoteExpected const& r) const noexcept {
+                RemoteHasher rHasher;
+                auto h1 = rHasher(r.remote);
+                auto h2 = std::hash<uint8_t>()(r.expectedSeqNum);
+                return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1<<6) + (h1>>2));
+            }
+        };
+
         class Packet {
         public:
             // Creates blank packet
@@ -47,13 +93,14 @@ class SongbirdCore {
             void setSequenceNum(uint8_t seqNum);
 
             uint8_t getHeader() const;
-            int64_t getSequenceNum() const;
+            uint8_t getSequenceNum() const;
             std::vector<uint8_t> getPayload() const;
             std::size_t getPayloadLength() const;
             std::size_t getRemainingBytes() const;
 
             // Remote info (for server mode responses)
-            void setRemoteInfo(const IPAddress& ip, uint16_t port);
+            void setRemote(const IPAddress& ip, uint16_t port);
+            Remote getRemote() const;
             IPAddress getRemoteIP() const;
             uint16_t getRemotePort() const;
 
@@ -95,12 +142,18 @@ class SongbirdCore {
         //Sets general read handler (invoked for all incoming packets)
         void setReadHandler(ReadHandler handler);
 
-        // Attach a response handler for packets with a particular header
-        void setSpecificHandler(uint8_t header, ReadHandler handler);
-        void clearSpecificHandler(uint8_t header);
+        // Attach a handler for packets with a particular header
+        void setHeaderHandler(uint8_t header, ReadHandler handler);
+        void clearHeaderHandler(uint8_t header);
 
-        // Blocking wait for a response packet with the given header (returns nullptr on timeout)
+        // Attach a handler for packets with a particular remote source
+        void setRemoteHandler(IPAddress remoteIP, uint16_t remotePort, ReadHandler hander);
+        void clearRemoteHandler(IPAddress remoteIP, uint16_t remotePort);
+
+        // Blocking wait for a packet with the given header (returns nullptr on timeout)
         std::shared_ptr<Packet> waitForHeader(uint8_t header, uint32_t timeoutMs);
+        // Blocking wait for a packet with the given remote (returns nullptr on timeout)
+        std::shared_ptr<Packet> waitForRemote(IPAddress remoteIP, uint16_t remotePort, uint32_t timeoutMs);
 
         // Attaches stream object
         void attachStream(IStream* stream);
@@ -151,21 +204,20 @@ class SongbirdCore {
         ///////////////////////////////////////
         // Specific to packet mode
 
-        std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> incomingPackets;
+        std::unordered_map<RemoteExpected, std::shared_ptr<SongbirdCore::Packet>, RemoteExpectedHasher> incomingPackets;
 
         // Outgoing packet sequence numbers
         std::atomic<uint8_t> nextSeqNum;
 
-        // Expected incoming packet sequence number
-        uint8_t expectedSeqNum;
+        // Expected incoming packet sequence numbers by remotes
+        std::unordered_map<Remote, RemoteOrder, RemoteHasher> remoteOrders;
         // Missing-packet timeout (milliseconds). If the next expected sequence
         // does not arrive within this window, the core will advance to the
         // next available sequence to avoid blocking forever.
         uint32_t missingPacketTimeoutMs;
 
-        // Timestamp (millis) when we started waiting for the next expected sequence.
-        unsigned long missingSinceMs;
-        bool missingTimerActive;
+        // Handlers by remotes
+        std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;
 
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
         std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatchPackets();
@@ -198,9 +250,11 @@ class SongbirdCore {
         ReadHandler readHandler;
 
         // Response handlers keyed by header
-        std::unordered_map<uint8_t, ReadHandler> specificHandlers;
+        std::unordered_map<uint8_t, ReadHandler> headerHandlers;
         // last packet received per header (for waitForHeader)
-        std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> lastHeaderMap;
+        std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> headerMap;
+        // last packet received per remote (for waitForRemote)
+        std::unordered_map<Remote, std::shared_ptr<SongbirdCore::Packet>, RemoteHasher> remoteMap;
 };
 
 template <typename T>
