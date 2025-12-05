@@ -256,11 +256,19 @@ void SongbirdCore::setMissingPacketTimeout(uint32_t ms) {
     missingPacketTimeoutMs = ms;
 }
 
-void SongbirdCore::holdPacket(const Packet& packet) {
-    if (processMode == STREAM) {
-        std::vector<uint8_t> bytes = packet.toBytes(processMode);
-        appendToWriteBuffer(bytes.data(), bytes.size());
+void SongbirdCore::setAllowOutofOrder(bool allow) {
+    if (allowOutofOrder == allow) return;
+    allowOutofOrder = allow;
+    if (allow) {
+        // Clears remote ordering map
+        remoteOrders.clear();
     }
+}
+
+void SongbirdCore::holdPacket(const Packet& packet) {
+    if (processMode != STREAM) return;
+    std::vector<uint8_t> bytes = packet.toBytes(processMode);
+    appendToWriteBuffer(bytes.data(), bytes.size());
 }
 
 void SongbirdCore::sendPacket(Packet& packet) {
@@ -311,13 +319,24 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
                 RemoteOrder order {pkt->getSequenceNum(), false, 0};
                 remoteOrders[remote] = order;
             }
-
-            RemoteExpected expected{pkt->getRemote(), pkt->getSequenceNum()};
-            incomingPackets[expected] = pkt;
         }
 
-        auto dispatch = dispatchPackets();
-        
+        std::vector<std::shared_ptr<Packet>> dispatch;
+        if (allowOutofOrder) {
+            callHandlers(pkt);
+            SpinLockGuard guard(dataSpinlock);
+            // If any remaining packets in incoming packets add to dispatch
+            for (const auto &p: incomingPackets) {
+                dispatch.push_back(p.second);
+            }
+        } else {
+            SpinLockGuard guard(dataSpinlock);
+            RemoteExpected expected{pkt->getRemote(), pkt->getSequenceNum()};
+            incomingPackets[expected] = pkt;
+
+            auto dispatch = reorderPackets();
+        }
+
         // Call handlers on dispatched packets
         for (auto& p : dispatch) {
             callHandlers(p);
@@ -353,7 +372,7 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t
     return pkt;
 }
 
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::dispatchPackets() {
+std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets() {
     SpinLockGuard guard(dataSpinlock);
     std::vector<std::shared_ptr<Packet>> dispatch;
     // Process ordered packets from incomingPackets. If the expected packet

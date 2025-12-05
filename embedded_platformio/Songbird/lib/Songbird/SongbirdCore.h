@@ -164,6 +164,9 @@ class SongbirdCore {
         // Configure missing-packet timeout (ms)
         void setMissingPacketTimeout(uint32_t ms);
 
+        // Whether out of order packets are allowed (less latency)
+        void setAllowOutofOrder(bool allow);
+
         ////////////////////////////////////////////
         // Specific to stream mode
         // Holds a packet in the write buffer
@@ -220,13 +223,16 @@ class SongbirdCore {
         std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;
 
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
-        std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatchPackets();
+        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderPackets();
 
         ////////////////////////////////////////
         // Specific to stream mode
 
         // New packet flag (looks for new packet in read buffer)
         bool newPacket = true;
+
+        // Allows out of order packets
+        bool allowOutofOrder = true;
 
         // Returns the next packet in readBuffer if there is one
         std::shared_ptr<Packet> packetFromStream();
