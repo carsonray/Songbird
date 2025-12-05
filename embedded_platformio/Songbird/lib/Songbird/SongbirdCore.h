@@ -48,15 +48,13 @@ class SongbirdCore {
 
             uint8_t getHeader() const;
             int64_t getSequenceNum() const;
+            std::vector<uint8_t> getPayload() const;
             std::size_t getPayloadLength() const;
             std::size_t getRemainingBytes() const;
 
             // Remote info (for server mode responses)
-            void setRemoteInfo(const std::string& ip, uint16_t port) {
-                remoteIP = ip;
-                remotePort = port;
-            }
-            std::string getRemoteIP() const;
+            void setRemoteInfo(const IPAddress& ip, uint16_t port);
+            IPAddress getRemoteIP() const;
             uint16_t getRemotePort() const;
 
             // Writing functions
@@ -85,7 +83,7 @@ class SongbirdCore {
             mutable std::size_t readPos = 0;
 
             // Remote info (for server mode responses)
-            std::string remoteIP;
+            IPAddress remoteIP;
             uint16_t remotePort = 0;
         };
 
@@ -93,9 +91,6 @@ class SongbirdCore {
 
         SongbirdCore(std::string name, ProcessMode mode = PACKET);
         ~SongbirdCore();
-
-        // Attaches a stream to the protocol
-        void attachStream(std::shared_ptr<IStream> stream);
 
         //Sets general read handler (invoked for all incoming packets)
         void setReadHandler(ReadHandler handler);
@@ -107,8 +102,8 @@ class SongbirdCore {
         // Blocking wait for a response packet with the given header (returns nullptr on timeout)
         std::shared_ptr<Packet> waitForHeader(uint8_t header, uint32_t timeoutMs);
 
-        // Gets stream object
-        std::shared_ptr<IStream> getStream();
+        // Attaches stream object
+        void attachStream(IStream* stream);
 
         ////////////////////////////////////////////
         // Specific to packet mode
@@ -142,11 +137,11 @@ class SongbirdCore {
 
         // Parses data from stream
         void parseData(const uint8_t* data, std::size_t length);
-        void parseData(const uint8_t* data, std::size_t length, std::string remoteIP, uint16_t remotePort);
+        void parseData(const uint8_t* data, std::size_t length, IPAddress remoteIP, uint16_t remotePort);
 
     private:
         std::string name;
-        std::shared_ptr<IStream> stream;
+        IStream* stream;
         std::vector<uint8_t> readBuffer;
         std::vector<uint8_t> writeBuffer;
 

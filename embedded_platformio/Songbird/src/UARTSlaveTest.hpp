@@ -2,7 +2,6 @@
 #include <memory>
 #include "SongbirdCore.h"
 #include "SongbirdUARTNode.h"
-#include "UARTStream.h"
 
 #define SERIAL_BAUD 115200
 
@@ -181,7 +180,7 @@ void testsTask(void* pvParameters) {
 
 void updateTask(void* pvParameters) {
   while (true) {
-    core->updateData();
+    uartNode.updateData();
     vTaskDelay(1); // Yield to other tasks
   }
 }

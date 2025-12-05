@@ -4,10 +4,10 @@
 #include <memory>
 #include <string>
 #include <Arduino.h>
-#include "UARTStream.h"
+#include "IStream.h"
 #include "SongbirdCore.h"
 
-class SongbirdUARTNode {
+class SongbirdUARTNode: public IStream {
 public:
      SongbirdUARTNode(std::string name);
     ~SongbirdUARTNode();
@@ -15,17 +15,20 @@ public:
     // Initialize and open the serial port
     bool begin(unsigned int baudRate);
 
+    void updateData();
+
     // Close the serial port
-    void end();
+    void close() override;
+
+    void write(const uint8_t* buffer, std::size_t length) override;
 
     // Get the MinBiTCore protocol object
     std::shared_ptr<SongbirdCore> getProtocol();
 
     // Check if the serial port is open
-    bool isOpen() const;
+    bool isOpen() const override;
 
 private:
-    std::shared_ptr<UARTStream> serialStream;
     std::shared_ptr<SongbirdCore> protocol;
 };
 

@@ -42,12 +42,29 @@ int64_t SongbirdCore::Packet::getSequenceNum() const {
     return static_cast<int64_t>(sequenceNum);
 }
 
+std::vector<uint8_t> SongbirdCore::Packet::getPayload() const {
+    return payload;
+}
+
 std::size_t SongbirdCore::Packet::getPayloadLength() const {
     return payloadLength;
 }
 
 std::size_t SongbirdCore::Packet::getRemainingBytes() const {
     return payload.size() - readPos;
+}
+
+void SongbirdCore::Packet::setRemoteInfo(const IPAddress& ip, uint16_t port) {
+    remoteIP = ip;
+    remotePort = port;
+}
+
+IPAddress SongbirdCore::Packet::getRemoteIP() const {
+    return remoteIP;
+}
+
+uint16_t SongbirdCore::Packet::getRemotePort() const {
+    return remotePort;
 }
 
 void SongbirdCore::Packet::writeBytes(const uint8_t* buffer, std::size_t length) {
@@ -126,7 +143,7 @@ int16_t SongbirdCore::Packet::readInt16() {
 /// SongbirdCore implementation
 
 SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode)
-    : name(std::move(name)), stream(nullptr), processMode(mode), nextSeqNum(0), expectedSeqNum(0),
+    : name(std::move(name)), processMode(mode), nextSeqNum(0), expectedSeqNum(0),
         missingPacketTimeoutMs(100), missingSinceMs(0), missingTimerActive(false)
 {
     // initialize spinlocks
@@ -137,8 +154,7 @@ SongbirdCore::~SongbirdCore() {
     flush();
 }
 
-void SongbirdCore::attachStream(std::shared_ptr<IStream> stream) {
-    SpinLockGuard guard(dataSpinlock);
+void SongbirdCore::attachStream(IStream* stream) {
     this->stream = stream;
 }
 
@@ -186,11 +202,6 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
     return nullptr;
 }
 
-std::shared_ptr<IStream> SongbirdCore::getStream() {
-    SpinLockGuard guard(dataSpinlock);
-    return stream;
-}
-
 SongbirdCore::Packet SongbirdCore::createPacket(uint8_t header) {
     return Packet(header);
 }
@@ -218,8 +229,7 @@ void SongbirdCore::sendPacket(Packet& packet) {
 
 void SongbirdCore::sendAll() {
     // attempt immediate send if stream available
-    std::shared_ptr<IStream> s = getStream();
-    if (s) {
+    if (stream && stream->isOpen()) {
         std::vector<uint8_t> localBuf;
         {
             SpinLockGuard guard(dataSpinlock);
@@ -230,7 +240,7 @@ void SongbirdCore::sendAll() {
         }
 
         if (!localBuf.empty()) {
-            s->write(localBuf.data(), localBuf.size());
+            stream->write(localBuf.data(), localBuf.size());
         }
     }
 }
@@ -239,11 +249,11 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length) {
     parseData(data, length, "", 0);
 }
 
-void SongbirdCore::parseData(const uint8_t* data, std::size_t length, std::string remoteIP, uint16_t remotePort) {
+void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress remoteIP, uint16_t remotePort) {
     if (processMode == PACKET) {
         
         auto pkt = packetFromData(data, length);
-        if (!remoteIP.empty()) {
+        if (remoteIP != IPAddress()) {
             pkt->setRemoteInfo(remoteIP, remotePort);
         }
         {
@@ -262,7 +272,7 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, std::strin
         while (true) {
             std::shared_ptr<Packet> pkt;
             pkt = packetFromStream();
-            if (!remoteIP.empty()) {
+            if (remoteIP != IPAddress()) {
                 pkt->setRemoteInfo(remoteIP, remotePort);
             }
             if (!pkt) break;
