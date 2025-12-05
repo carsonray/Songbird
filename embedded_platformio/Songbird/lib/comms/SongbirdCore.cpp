@@ -6,31 +6,40 @@
 #include <cassert>
 
 /// Packet implementation
-SongbirdCore::Packet::Packet() : sequenceNum(0), header(0), payloadLength(0), payload(), readPos(0) {}
-SongbirdCore::Packet::Packet(uint8_t sequenceNum, uint8_t header)
-    : sequenceNum(sequenceNum), header(header), payloadLength(0), payload(), readPos(0) {}
+SongbirdCore::Packet::Packet(uint8_t header)
+    : header(header), sequenceNum(0), payloadLength(0), payload(), readPos(0) {}
 
-SongbirdCore::Packet::Packet(uint8_t sequenceNum, uint8_t header, const std::vector<uint8_t>& payload)
-    : sequenceNum(sequenceNum), header(header), payloadLength(payload.size()), payload(payload), readPos(0) {}
+SongbirdCore::Packet::Packet(uint8_t header, const std::vector<uint8_t>& payload)
+    : header(header), sequenceNum(0), payloadLength(payload.size()), payload(payload), readPos(0) {}
 
-std::vector<uint8_t> SongbirdCore::Packet::toBytes() const {
+std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mode) const {
     std::vector<uint8_t> out;
-    out.reserve(3 + payloadLength);
-    out.push_back(static_cast<uint8_t>(sequenceNum));
+    out.reserve(2 + payloadLength);
     out.push_back(header);
-    out.push_back(static_cast<uint8_t>(payloadLength));
+    if (mode == SongbirdCore::STREAM) {
+        // Length is needed for stream framing
+        out.push_back(static_cast<uint8_t>(payloadLength));
+    } else if (mode == SongbirdCore::PACKET) {
+        // In packet mode, length is implicit but sequence number is needed to preserve ordering
+        out.push_back(sequenceNum);
+    }
+    
     if (!payload.empty()) {
         out.insert(out.end(), payload.begin(), payload.end());
     }
     return out;
 }
 
-int64_t SongbirdCore::Packet::getSequenceNum() const {
-    return static_cast<int64_t>(sequenceNum);
+void SongbirdCore::Packet::setSequenceNum(uint8_t seqNum) {
+    sequenceNum = seqNum;
 }
 
 uint8_t SongbirdCore::Packet::getHeader() const {
     return header;
+}
+
+int64_t SongbirdCore::Packet::getSequenceNum() const {
+    return static_cast<int64_t>(sequenceNum);
 }
 
 std::size_t SongbirdCore::Packet::getPayloadLength() const {
@@ -116,18 +125,12 @@ int16_t SongbirdCore::Packet::readInt16() {
 
 /// SongbirdCore implementation
 
-SongbirdCore::SongbirdCore(std::string name)
-    : name(std::move(name)), stream(nullptr), nextSeqNum(0), expectedSeqNum(0),
+SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode)
+    : name(std::move(name)), stream(nullptr), processMode(mode), nextSeqNum(0), expectedSeqNum(0),
         missingPacketTimeoutMs(100), missingSinceMs(0), missingTimerActive(false)
 {
     // initialize spinlocks
     dataSpinlock = portMUX_INITIALIZER_UNLOCKED;
-
-    // reliability enabled by default
-    {
-        SpinLockGuard guard(dataSpinlock);
-        reliabilityEnabled = true;
-    }
 }
 
 SongbirdCore::~SongbirdCore() {
@@ -169,8 +172,6 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
 
     unsigned long start = millis();
     while ((millis() - start) < timeoutMs) {
-        // Updates data
-        updateData();
         {
             SpinLockGuard guard(dataSpinlock);
             auto it = lastHeaderMap.find(header);
@@ -180,7 +181,7 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
                 return pkt;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(2));
+        vTaskDelay(1);
     }
     return nullptr;
 }
@@ -191,8 +192,7 @@ std::shared_ptr<IStream> SongbirdCore::getStream() {
 }
 
 SongbirdCore::Packet SongbirdCore::createPacket(uint8_t header) {
-    uint8_t seq = nextSeqNum.fetch_add(1);
-    return Packet(seq, header);
+    return Packet(header);
 }
 
 void SongbirdCore::setMissingPacketTimeout(uint32_t ms) {
@@ -200,29 +200,18 @@ void SongbirdCore::setMissingPacketTimeout(uint32_t ms) {
     missingPacketTimeoutMs = ms;
 }
 
-void SongbirdCore::setReliabilityEnabled(bool enabled) {
-    {
-        SpinLockGuard guard(dataSpinlock);
-        reliabilityEnabled = enabled;
-        // when turning off reliability, reset missing tracker so parser doesn't
-        // immediately advance sequences based on old state
-        if (!enabled) {
-            missingTimerActive = false;
-        }
+void SongbirdCore::holdPacket(const Packet& packet) {
+    if (processMode == STREAM) {
+        std::vector<uint8_t> bytes = packet.toBytes(processMode);
+        appendToWriteBuffer(bytes.data(), bytes.size());
     }
 }
 
-bool SongbirdCore::isReliabilityEnabled() const {
-    SpinLockGuard guard(dataSpinlock);
-    return reliabilityEnabled;
-}
-
-void SongbirdCore::holdPacket(const Packet& packet) {
-    std::vector<uint8_t> bytes = packet.toBytes();
-    appendToWriteBuffer(bytes.data(), bytes.size());
-}
-
-void SongbirdCore::sendPacket(const Packet& packet) {
+void SongbirdCore::sendPacket(Packet& packet) {
+    // Attaches sequence number if in packet mode
+    if (processMode == PACKET) {
+        packet.setSequenceNum(nextSeqNum.fetch_add(1));
+    }
     holdPacket(packet);
     sendAll();
 }
@@ -246,130 +235,151 @@ void SongbirdCore::sendAll() {
     }
 }
 
-void SongbirdCore::updateData() {
-    // Pull bytes from stream into readBuffer. Don't hold spinlock while
-    // performing I/O on the stream; copy bytes into readBuffer under lock.
-    std::shared_ptr<IStream> s = getStream();
-    if (s) {
-        std::size_t avail = s->available();
-        if (avail > 0) {
-            std::vector<uint8_t> tmp(avail);
-            std::size_t got = s->read(tmp.data(), avail);
-            if (got > 0) {
-                appendToReadBuffer(tmp.data(), got);
-            }
-        }
-    }
+void SongbirdCore::parseData(const uint8_t* data, std::size_t length) {
+    parseData(data, length, "", 0);
+}
 
-    // Process complete packets in readBuffer. Depending on reliabilityEnabled
-    // we either buffer by sequence (reliable) or dispatch immediately
-    std::vector<std::shared_ptr<Packet>> dispatch;
-    while (true) {
-        std::shared_ptr<Packet> pkt;
+void SongbirdCore::parseData(const uint8_t* data, std::size_t length, std::string remoteIP, uint16_t remotePort) {
+    if (processMode == PACKET) {
+        
+        auto pkt = packetFromData(data, length);
+        if (!remoteIP.empty()) {
+            pkt->setRemoteInfo(remoteIP, remotePort);
+        }
         {
             SpinLockGuard guard(dataSpinlock);
-            if (!characterizePacket()) break;
-            // we have a full packet in readBuffer; construct it
+            incomingPackets[pkt->getSequenceNum()] = pkt;
+        }
 
-            std::vector<uint8_t> payload;
-            if (currPayloadLen)
-                payload.insert(payload.end(), readBuffer.begin() + 3, readBuffer.begin() + 3 + currPayloadLen);
-            pkt = std::make_shared<Packet>(currSeqNum, currHeader, payload);
-
-            // erase consumed bytes
-            readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 3 + currPayloadLen);
-
-            // If reliability disabled, collect for immediate dispatch; otherwise buffer
-            if (!reliabilityEnabled) {
-                dispatch.push_back(pkt);
-            } else {
-                incomingPackets[currSeqNum] = pkt;
+        auto dispatch = dispatchPackets();
+        
+        // Call handlers on dispatched packets
+        for (auto& p : dispatch) {
+            callHandlers(p);
+        }
+    } else if (processMode == STREAM) {
+        // Process complete packets in readBuffer
+        while (true) {
+            std::shared_ptr<Packet> pkt;
+            pkt = packetFromStream();
+            if (!remoteIP.empty()) {
+                pkt->setRemoteInfo(remoteIP, remotePort);
             }
+            if (!pkt) break;
+            // Call handlers on packet
+            callHandlers(pkt);
         }
     }
+}
 
+std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t* data, std::size_t length) {
+    // Parses packet
+    uint8_t currHeader = data[0];
+    uint8_t currSeqNum = data[1];
+    // For packet mode, payload length is implicit: consume all remaining data
+    std::vector<uint8_t> payload;
+    if (length > 2) {
+        payload.insert(payload.end(), data + 2, data + length);
+    }
+    auto pkt = std::make_shared<Packet>(currHeader, payload);
+    pkt->setSequenceNum(currSeqNum);
+    return pkt;
+}
+
+std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::dispatchPackets() {
+    SpinLockGuard guard(dataSpinlock);
+    std::vector<std::shared_ptr<Packet>> dispatch;
     // Process ordered packets from incomingPackets. If the expected packet
     // doesn't arrive within the configured timeout, advance to the next
     // available sequence to avoid blocking forever.
-    if (reliabilityEnabled) {
-        SpinLockGuard guard(dataSpinlock);
-        // Keep processing while there's a packet matching expectedSeqNum.
-        while (true) {
-            auto it = incomingPackets.find(expectedSeqNum);
-            if (it != incomingPackets.end()) {
-                // move packet to dispatch list and remove from buffer
-                dispatch.push_back(it->second);
-                incomingPackets.erase(it);
-                expectedSeqNum++;
-                missingTimerActive = false;
-                continue;
-            }
+    
+    // Keep processing while there's a packet matching expectedSeqNum.
+    while (true) {
+        auto it = incomingPackets.find(expectedSeqNum);
+        if (it != incomingPackets.end()) {
+            // move packet to dispatch list and remove from buffer
+            dispatch.push_back(it->second);
+            incomingPackets.erase(it);
+            expectedSeqNum++;
+            missingTimerActive = false;
+            continue;
+        }
 
-            // No packet with expectedSeqNum currently available
-            if (incomingPackets.empty()) {
-                // nothing to do, reset timer
-                missingTimerActive = false;
-                break;
-            }
+        // No packet with expectedSeqNum currently available
+        if (incomingPackets.empty()) {
+            // nothing to do, reset timer
+            missingTimerActive = false;
+            break;
+        }
 
-            // There are packets buffered but not the one we expect. Start timer if not started
-            unsigned long nowMs = millis();
-            if (!missingTimerActive) {
-                missingSinceMs = nowMs;
-                missingTimerActive = true;
-                break; // give more time for missing packet to arrive
-            }
+        // There are packets buffered but not the one we expect. Start timer if not started
+        unsigned long nowMs = millis();
+        if (!missingTimerActive) {
+            missingSinceMs = nowMs;
+            missingTimerActive = true;
+            break; // give more time for missing packet to arrive
+        }
 
-            auto elapsed = static_cast<int64_t>(nowMs - missingSinceMs);
-            if (elapsed < static_cast<int64_t>(missingPacketTimeoutMs)) {
-                // not timed out yet
-                break;
-            }
+        auto elapsed = static_cast<int64_t>(nowMs - missingSinceMs);
+        if (elapsed < static_cast<int64_t>(missingPacketTimeoutMs)) {
+            // not timed out yet
+            break;
+        }
 
-            // timed out waiting for expectedSeqNum. Advance to the buffered
-            // sequence that is closest forward from expectedSeqNum (wraparound
-            // safe). Compute distance as unsigned subtraction so wraparound is
-            // handled correctly: dist = (uint8_t)(key - expectedSeqNum).
-            uint8_t bestKey = 0;
-            uint8_t bestDist = 0;
-            bool found = false;
-            for (const auto &p : incomingPackets) {
-                uint8_t key = p.first;
-                // distance forward from expectedSeqNum (0 means equal)
-                uint8_t dist = static_cast<uint8_t>(key - expectedSeqNum);
-                if (dist == 0) continue; // would have matched earlier
-                if (!found || dist < bestDist) {
-                    bestDist = dist;
-                    bestKey = key;
-                    found = true;
-                }
-            }
-            if (found) {
-                // advance expectedSeqNum to the closest available sequence
-                expectedSeqNum = bestKey;
-                missingTimerActive = false;
-                continue;
-            } else {
-                // no suitable packet to advance to
-                break;
+        // timed out waiting for expectedSeqNum. Advance to the buffered
+        // sequence that is closest forward from expectedSeqNum (wraparound
+        // safe). Compute distance as unsigned subtraction so wraparound is
+        // handled correctly: dist = (uint8_t)(key - expectedSeqNum).
+        uint8_t bestKey = 0;
+        uint8_t bestDist = 0;
+        bool found = false;
+        for (const auto &p : incomingPackets) {
+            uint8_t key = p.first;
+            // distance forward from expectedSeqNum (0 means equal)
+            uint8_t dist = static_cast<uint8_t>(key - expectedSeqNum);
+            if (dist == 0) continue; // would have matched earlier
+            if (!found || dist < bestDist) {
+                bestDist = dist;
+                bestKey = key;
+                found = true;
             }
         }
-    } else {
-        // If any incoming packets are buffered move to dispatch vector
-        SpinLockGuard guard(dataSpinlock);
-        for (auto &p : incomingPackets) {
-            dispatch.push_back(p.second);
-            incomingPackets.erase(p.first);
+        if (found) {
+            // advance expectedSeqNum to the closest available sequence
+            expectedSeqNum = bestKey;
+            missingTimerActive = false;
+            continue;
+        } else {
+            // no suitable packet to advance to
+            break;
         }
     }
+    return dispatch;
+}
 
-    // Dispatch collected in-order packets or immediate packets
-    for (auto &p : dispatch) {
-        callHandlers(p);
+std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStream() {
+    SpinLockGuard guard(dataSpinlock);
+    std::shared_ptr<SongbirdCore::Packet> pkt;
+    if (newPacket) {
+        // Must be called with dataMutex locked if used internally; it's safe to call without external lock
+        if (readBuffer.size() < 2) return pkt; // need at least header, len
+
+        newPacket = false;
     }
+    // Do we have the full payload?
+    if (readBuffer.size() < 2 + static_cast<std::size_t>(readBuffer[1])) return pkt;
+    newPacket = true;
+    // we have a full packet in readBuffer; construct it
+    uint8_t currHeader = readBuffer[0];
+    uint8_t currPayloadLen = readBuffer[1];
 
-    // Sends any data in write buffer if stream available
-    sendAll();
+    std::vector<uint8_t> payload;
+    payload.insert(payload.end(), readBuffer.begin() + 3, readBuffer.begin() + 3 + currPayloadLen);
+    pkt = std::make_shared<Packet>(currHeader, payload);
+
+    // erase consumed bytes
+    readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 3 + currPayloadLen);
+    return pkt;
 }
 
 void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
@@ -409,23 +419,6 @@ std::size_t SongbirdCore::getReadBufferSize() {
 std::size_t SongbirdCore::getWriteBufferSize() {
     SpinLockGuard guard(dataSpinlock);
     return writeBuffer.size();
-}
-
-bool SongbirdCore::characterizePacket() {
-    if (newPacket) {
-        // Must be called with dataMutex locked if used internally; it's safe to call without external lock
-        if (readBuffer.size() < 3) return false; // need at least seq, header, len
-        // Peek bytes
-        currSeqNum = readBuffer[0];
-        currHeader = readBuffer[1];
-        currPayloadLen = readBuffer[2];
-
-        newPacket = false;
-    }
-    // Do we have the full payload?
-    if (readBuffer.size() < 3 + static_cast<std::size_t>(currPayloadLen)) return false;
-    newPacket = true;
-    return true;
 }
 
 void SongbirdCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {

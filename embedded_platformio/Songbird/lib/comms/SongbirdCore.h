@@ -1,6 +1,6 @@
 // ...existing code...
-#ifndef RUDP_CORE_H
-#define RUDP_CORE_H
+#ifndef SONGBIRD_CORE_H
+#define SONGBIRD_CORE_H
 
 #include <vector>
 #include <cstring>
@@ -28,22 +28,36 @@ struct SpinLockGuard {
 
 class SongbirdCore {
     public:
+        enum ProcessMode {
+            STREAM,
+            PACKET
+        };
+
         class Packet {
         public:
             // Creates blank packet
-            Packet();
-            // Creates packet with header and sequence number
-            Packet(uint8_t sequenceNum, uint8_t header);
+            Packet(uint8_t header);
             // Creates packet with a payload
-            Packet(uint8_t sequenceNum, uint8_t header, const std::vector<uint8_t>& payload);
+            Packet(uint8_t header, const std::vector<uint8_t>& payload);
 
             // Converts packet to byte vector for transmission
-            std::vector<uint8_t> toBytes() const;
+            std::vector<uint8_t> toBytes(SongbirdCore::ProcessMode mode) const;
 
-            int64_t getSequenceNum() const;
+            // Sets sequence number
+            void setSequenceNum(uint8_t seqNum);
+
             uint8_t getHeader() const;
+            int64_t getSequenceNum() const;
             std::size_t getPayloadLength() const;
             std::size_t getRemainingBytes() const;
+
+            // Remote info (for server mode responses)
+            void setRemoteInfo(const std::string& ip, uint16_t port) {
+                remoteIP = ip;
+                remotePort = port;
+            }
+            std::string getRemoteIP() const;
+            uint16_t getRemotePort() const;
 
             // Writing functions
             void writeBytes(const uint8_t* buffer, std::size_t length);
@@ -63,17 +77,21 @@ class SongbirdCore {
             T readData();
 
         private:
-            uint8_t sequenceNum;
             uint8_t header;
+            uint8_t sequenceNum;
             std::size_t payloadLength;
             std::vector<uint8_t> payload;
             // read cursor into payload
             mutable std::size_t readPos = 0;
+
+            // Remote info (for server mode responses)
+            std::string remoteIP;
+            uint16_t remotePort = 0;
         };
 
         using ReadHandler = std::function<void(std::shared_ptr<SongbirdCore::Packet>)>;
 
-        SongbirdCore(std::string name);
+        SongbirdCore(std::string name, ProcessMode mode = PACKET);
         ~SongbirdCore();
 
         // Attaches a stream to the protocol
@@ -92,44 +110,52 @@ class SongbirdCore {
         // Gets stream object
         std::shared_ptr<IStream> getStream();
 
-        // Creates a blank packet with a specified header
-        Packet createPacket(uint8_t header);
+        ////////////////////////////////////////////
+        // Specific to packet mode
 
-        // Sends a packet
-        void sendPacket(const Packet& packet);
+        // Configure missing-packet timeout (ms)
+        void setMissingPacketTimeout(uint32_t ms);
 
+        ////////////////////////////////////////////
+        // Specific to stream mode
         // Holds a packet in the write buffer
         void holdPacket(const Packet& packet);
 
         // Sends all data in write buffer
         void sendAll();
 
-        // Fetches data from stream and processes packets
-        void updateData();
-
-        // Configure missing-packet timeout (ms)
-        void setMissingPacketTimeout(uint32_t ms);
-
-        // Reliability control: when disabled, incoming packets are dispatched
-        // immediately as parsed (no ordering or timeout applied).
-        void setReliabilityEnabled(bool enabled);
-        bool isReliabilityEnabled() const;
-
         // Flushes all buffers
         void flush();
 
+        // Gets buffer sizes
         std::size_t getReadBufferSize();
         std::size_t getWriteBufferSize();
 
-        // Buffer management
-        void appendToReadBuffer(const uint8_t* data, std::size_t length);
-        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
+        //////////////////////////////////////////////
+        // Both modes
+
+        // Creates a new packet
+        Packet createPacket(uint8_t header);
+
+        // Sends a packet
+        void sendPacket(Packet& packet);
+
+        // Parses data from stream
+        void parseData(const uint8_t* data, std::size_t length);
+        void parseData(const uint8_t* data, std::size_t length, std::string remoteIP, uint16_t remotePort);
 
     private:
         std::string name;
         std::shared_ptr<IStream> stream;
         std::vector<uint8_t> readBuffer;
         std::vector<uint8_t> writeBuffer;
+
+        //Process mode
+        ProcessMode processMode;
+
+        ///////////////////////////////////////
+        // Specific to packet mode
+
         std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> incomingPackets;
 
         // Outgoing packet sequence numbers
@@ -145,20 +171,25 @@ class SongbirdCore {
         // Timestamp (millis) when we started waiting for the next expected sequence.
         unsigned long missingSinceMs;
         bool missingTimerActive;
-        // When true the core enforces ordering and timeouts; when false packets
-        // are dispatched immediately as they are parsed.
-        bool reliabilityEnabled;
 
-        // Current incoming packet temporary fields (used by characterizePacket)
-        uint8_t currSeqNum = 0;
-        uint8_t currHeader = 0;
-        std::size_t currPayloadLen = 0;
+        std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
+        std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatchPackets();
+
+        ////////////////////////////////////////
+        // Specific to stream mode
 
         // New packet flag (looks for new packet in read buffer)
         bool newPacket = true;
 
-        // Characterizes incoming packet (inspects readBuffer and returns true if a full packet is available)
-        bool characterizePacket();
+        // Returns the next packet in readBuffer if there is one
+        std::shared_ptr<Packet> packetFromStream();
+
+        // Buffer management
+        void appendToReadBuffer(const uint8_t* data, std::size_t length);
+        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
+
+        ////////////////////////////////////////
+        // Both modes
 
         // Triggers handlers based on packet
         void callHandlers(std::shared_ptr<Packet> pkt);
@@ -173,7 +204,7 @@ class SongbirdCore {
 
         // Response handlers keyed by header
         std::unordered_map<uint8_t, ReadHandler> specificHandlers;
-        // last response packet received per header (for waitForResponse)
+        // last packet received per header (for waitForHeader)
         std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> lastHeaderMap;
 };
 
@@ -188,4 +219,4 @@ T SongbirdCore::Packet::readData() {
     return data;
 }
 
-#endif // RUDP_CORE_H
+#endif // SONGBIRD_CORE_H

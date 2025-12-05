@@ -22,7 +22,7 @@
 #define SERIAL_BAUD_RATE 115200
 
 //Serial node object
-SongbirdUARTNode uartNode("Middleware Interface");
+SongbirdUARTNode uartNode("UART Node");
 //Serial server protocol object
 std::shared_ptr<SongbirdCore> core;
 
