@@ -147,7 +147,7 @@ int16_t SongbirdCore::Packet::readInt16() {
 // SongbirdCore implementation
 
 SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode)
-    : name(std::move(name)), processMode(mode), nextSeqNum(0), missingPacketTimeoutMs(100)
+    : self(this), name(std::move(name)), processMode(mode), nextSeqNum(0), missingPacketTimeoutMs(100)
 {
     // initialize spinlocks
     dataSpinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -321,14 +321,15 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
             }
         } else {
             SpinLockGuard guard(dataSpinlock);
-            Remote remote = pkt->getRemote();
+            const Remote remote = pkt->getRemote();
             // If it is a new remote and ordering mode is on, add to remote order map
             auto it = remoteOrders.find(remote);
             if (it == remoteOrders.end()) {
-                RemoteOrder order {pkt->getSequenceNum(), false, 0};
+                TimeoutID id{this, remote};
+                RemoteOrder order {pkt->getSequenceNum(), id};
                 remoteOrders[remote] = order;
             }
-            RemoteExpected expected{pkt->getRemote(), pkt->getSequenceNum()};
+            const RemoteExpected expected{pkt->getRemote(), pkt->getSequenceNum()};
             incomingPackets[expected] = pkt;
 
             dispatch = reorderPackets();
@@ -378,72 +379,118 @@ std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets(
         Remote r = itOrder->first;
         RemoteOrder& order = itOrder->second;   // ← REFERENCE, not copy
 
-        while (true)
-        {
-            RemoteExpected key{ r, order.expectedSeqNum };
-            auto itPkt = incomingPackets.find(key);
-
-            // Checks for packet with correct sequence number
-            if (itPkt != incomingPackets.end())
-            {
-                dispatch.push_back(itPkt->second);
-                incomingPackets.erase(itPkt->first);
-                order.expectedSeqNum++;
-                order.missingTimerActive = false;
-                continue;
-            }
-
-            unsigned long nowMs = millis();
-
-            // No packets with correct sequence, starting timeout
-            if (!order.missingTimerActive)
-            {
-                order.missingTimerActive = true;
-                order.missingSinceMs = nowMs;
-                break;
-            }
-            
-            // Timer not yet expired
-            if ((nowMs - order.missingSinceMs) < missingPacketTimeoutMs)
-                break;
-
-            // Timeout: find nearest forward seqNum for this remote
-            bool found = false;
-            uint8_t bestDist = 0xFF;
-            uint8_t bestSeq = 0;
-
-            for (auto &p : incomingPackets)
-            {
-                if (p.first.remote != r) continue;
-
-                uint8_t seq = p.first.seqNum;
-                uint8_t dist = uint8_t(seq - order.expectedSeqNum);
-
-                if (dist == 0) continue;
-
-                if (!found || dist < bestDist)
-                {
-                    found = true;
-                    bestDist = dist;
-                    bestSeq = seq;
-                }
-            }
-
-            if (found)
-            {
-                order.expectedSeqNum = bestSeq;
-                order.missingTimerActive = false;
-                continue;
-            }
-
-            // No packets for this remote — delete it safely
-            itOrder = remoteOrders.erase(itOrder);
-            remoteMap.erase(r);
-            break;
-        }
+        auto remotePackets = reorderRemote(r, order);
+        dispatch.insert(dispatch.end(), remotePackets.begin(), remotePackets.end());
     }
 
     return dispatch;
+}
+
+std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(const SongbirdCore::Remote r, SongbirdCore::RemoteOrder& order) {
+    std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatch;
+    while (true)
+    {
+        const RemoteExpected key{ r, order.expectedSeqNum };
+        auto itPkt = incomingPackets.find(key);
+
+        // Checks for packet with correct sequence number
+        if (itPkt != incomingPackets.end())
+        {
+            dispatch.push_back(itPkt->second);
+            incomingPackets.erase(itPkt);
+            order.expectedSeqNum++;
+            if (order.missingTimerActive) {
+                xTimerStop(order.missingTimer, 0);
+                order.missingTimerActive = false;
+            }
+            continue;
+        }
+
+        unsigned long nowMs = millis();
+
+        // No packets with correct sequence, starting timeout
+        if (!order.missingTimerActive)
+        {
+            order.missingTimerActive = true;
+            order.missingTimer = startMissingTimer(order);
+            break;
+        }
+
+        break;
+    }
+    return dispatch;
+}
+
+TimerHandle_t SongbirdCore::startMissingTimer(RemoteOrder& order)
+{
+    TimerHandle_t handle = xTimerCreate(
+        "missingTimer",
+        pdMS_TO_TICKS(missingPacketTimeoutMs),
+        pdFALSE, // one-shot
+        (void *) &order.timeoutID,
+        missingTimerCallback
+    );
+
+    // (re)start
+    xTimerStop(handle, 0);
+    xTimerChangePeriod(handle, pdMS_TO_TICKS(missingPacketTimeoutMs), 0);
+    xTimerStart(handle, 0);
+    return handle;
+}
+
+void SongbirdCore::onMissingTimeout(const Remote remote) {
+    std::vector<std::shared_ptr<Packet>> dispatch;
+    {
+        SpinLockGuard guard(dataSpinlock);
+        // Timeout: find nearest forward seqNum for this remote
+        bool found = false;
+        uint8_t bestDist = 0xFF;
+        uint8_t bestSeq = 0;
+
+        // Finds remote order from map
+        auto it = remoteOrders.find(remote);
+        if (it == remoteOrders.end()) return;
+        RemoteOrder& order = it->second;
+
+        for (auto &p : incomingPackets)
+        {
+            if (p.first.remote != remote) continue;
+
+            uint8_t seq = p.first.seqNum;
+            uint8_t dist = uint8_t(seq - order.expectedSeqNum);
+
+            if (!found || dist < bestDist)
+            {
+                found = true;
+                bestDist = dist;
+                bestSeq = seq;
+            }
+        }
+
+        if (found)
+        {
+            order.expectedSeqNum = bestSeq;
+            order.missingTimerActive = false;
+            dispatch = reorderRemote(remote, order);
+        } else {
+            // No packets for this remote — delete it safely
+            remoteOrders.erase(it);
+            remoteMap.erase(remote);
+        }
+    }
+
+    // Call handlers on dispatched packets
+    for (auto& p : dispatch) {
+        callHandlers(p);
+    }
+}
+
+void missingTimerCallback (TimerHandle_t xTimer) {
+    // Retrieve the SongbirdCore + Remote key
+    auto *ctx = static_cast<SongbirdCore::TimeoutID*>(pvTimerGetTimerID(xTimer));
+
+    // Mark that this remote timed out
+    ctx->owner->onMissingTimeout(ctx->remote);
 }
 
 std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStream() {

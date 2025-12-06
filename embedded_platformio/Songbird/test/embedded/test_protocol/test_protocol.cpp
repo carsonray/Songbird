@@ -175,7 +175,7 @@ void test_reliability_off() {
     });
 
     // Send three packets with out of order sequence numbers
-    uint8_t seqNums[3] = {1, 0, 2};
+    uint8_t seqNums[3] = {0, 3, 1};
     for (uint8_t i = 0; i < 3; ++i) {
         auto p = a->createPacket(seqNums[i]);
         p.writeByte(seqNums[i]);
@@ -184,10 +184,13 @@ void test_reliability_off() {
         cores.streamB->updateData();
     }
 
+    // Waits for timeout
+    vTaskDelay(pdMS_TO_TICKS(50));
+
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, headers[2], "Third header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[0], "First header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[1], "Second header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[2], "Third header");
 }
 
 void test_ordering_reliability() {
@@ -204,7 +207,7 @@ void test_ordering_reliability() {
 
     // Send three packets with out of order sequence numbers
     // Has to start with zero otherwise needs extra updates
-    uint8_t seqNums[3] = {0, 2, 1};
+    uint8_t seqNums[3] = {0, 3, 1};
     for (uint8_t i = 0; i < 3; ++i) {
         auto p = a->createPacket(seqNums[i]);
         p.writeByte(seqNums[i]);
@@ -212,10 +215,14 @@ void test_ordering_reliability() {
         // Give B the bytes
         cores.streamB->updateData();
     }
+
+    // Waits for timeout
+    vTaskDelay(pdMS_TO_TICKS(50));
+
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[0], "First header");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, headers[2], "Third header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[2], "Third header");
 }
 
 void test_integer_payload() {

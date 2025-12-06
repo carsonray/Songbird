@@ -50,11 +50,17 @@ class SongbirdCore {
                 return seqNum == o.seqNum && remote == o.remote;
             }
         };
+
+        struct TimeoutID {
+            SongbirdCore* owner;
+            Remote remote;
+        };
         
         struct RemoteOrder {
             uint8_t expectedSeqNum;
-            bool missingTimerActive;
-            uint64_t missingSinceMs;
+            TimeoutID timeoutID;
+            TimerHandle_t missingTimer = nullptr;
+            bool missingTimerActive = false;
         };
 
         // Custom hash functor
@@ -163,6 +169,7 @@ class SongbirdCore {
 
         // Configure missing-packet timeout (ms)
         void setMissingPacketTimeout(uint32_t ms);
+        void onMissingTimeout(const Remote remote);
 
         // Whether out of order packets are allowed (less latency)
         void setAllowOutofOrder(bool allow);
@@ -199,6 +206,7 @@ class SongbirdCore {
         void parseData(const uint8_t* data, std::size_t length, IPAddress remoteIP, uint16_t remotePort);
 
     private:
+        SongbirdCore* self;
         std::string name;
         IStream* stream;
         std::vector<uint8_t> readBuffer;
@@ -227,6 +235,8 @@ class SongbirdCore {
 
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
         std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderPackets();
+        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderRemote(const Remote remote, RemoteOrder& remoteOrder);
+        TimerHandle_t startMissingTimer(RemoteOrder& remoteOrder);
 
         ////////////////////////////////////////
         // Specific to stream mode
@@ -276,5 +286,7 @@ T SongbirdCore::Packet::readData() {
 
     return data;
 }
+
+void missingTimerCallback(TimerHandle_t xTimer);
 
 #endif // SONGBIRD_CORE_H
