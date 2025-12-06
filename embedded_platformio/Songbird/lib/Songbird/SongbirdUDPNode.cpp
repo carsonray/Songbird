@@ -52,6 +52,9 @@ uint16_t SongbirdUDPNode::getRemotePort() {
 uint16_t SongbirdUDPNode::getLocalPort() {
     return localPort;
 }
+std::shared_ptr<SongbirdCore> SongbirdUDPNode::getProtocol() {
+    return protocol;
+}
 
 bool SongbirdUDPNode::isBroadcast() {
     return broadcastMode;

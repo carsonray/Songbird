@@ -33,6 +33,7 @@ public:
     uint16_t getRemotePort();
     // Gets local port
     uint16_t getLocalPort();
+    std::shared_ptr<SongbirdCore> getProtocol();
 
     // IStream interface
     void write(const uint8_t* buffer, std::size_t length) override;

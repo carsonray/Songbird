@@ -1,20 +1,22 @@
 #include <Arduino.h>
 #include <memory>
 #include "SongbirdCore.h"
-#include "SongbirdUARTNode.h"
-#include "UARTStream.h"
+#include "SongbirdUDPNode.h"
+#include "WiFi.h"
 
-#define SERIAL_BAUD 115200
+// Simple test runner that mirrors the unit tests but uses the hardware
 
-// Simple test runner that mirrors the unit tests but uses the hardware Serial
+const char *ssid = "***********";
+const char *password = "***********";
+const uint16_t listenPort = 8080;
 
 // RTOS Task Handles
 TaskHandle_t testsTaskHandle = NULL;
 TaskHandle_t updateTaskHandler = NULL;
 
-//Serial node object
-SongbirdUARTNode uartNode("UART Node");
-//Serial server protocol object
+//UDP node object
+SongbirdUDPNode udpNode("UDP Node");
+//Protocol object
 std::shared_ptr<SongbirdCore> core;
 
 // RTOS task function prototypes
@@ -22,8 +24,22 @@ void testsTask(void* pvParameters);
 void updateTask(void* pvParameters);
 
 void setup() {
-  core = uartNode.getProtocol();
-  uartNode.begin(SERIAL_BAUD);
+  core = udpNode.getProtocol();
+
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    Serial.println("\nWiFi Failed");
+    while (1) {
+      delay(1000);
+    }
+  } else {
+    Serial.println("WiFi connected");
+  }
+
+  // Begins listening on port
+  udpNode.listen(listenPort);
 
   // Create RTOS tasks with appropriate priorities
   xTaskCreatePinnedToCore(
@@ -33,15 +49,6 @@ void setup() {
     NULL,               // Parameters
     2,                  // Priority (higher = more important)
     &testsTaskHandle,    // Task handle
-    0                   // Core (0 or 1)
-  );
-  xTaskCreatePinnedToCore(
-    updateTask,         // Task function
-    "Update_Task",      // Task name
-    4096,               // Stack size
-    NULL,               // Parameters
-    1,                  // Priority
-    &updateTaskHandler, // Task handle
     1                   // Core (0 or 1)
   );
 }
@@ -177,13 +184,6 @@ void testsTask(void* pvParameters) {
   core->sendPacket(pkt);
 
   vTaskSuspend(NULL); // Suspend this task
-}
-
-void updateTask(void* pvParameters) {
-  while (true) {
-    core->updateData();
-    vTaskDelay(1); // Yield to other tasks
-  }
 }
 
 void loop() {
