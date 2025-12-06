@@ -1,70 +1,72 @@
-// Unit tests for RUDPCore serial communication using a mock IStream.
+// Unit tests for SongbirdCore serial communication using a mock IStream.
 #include <Arduino.h>
 #include <unity.h>
 
-#include "RUDPCore.h"
+#include "SongbirdCore.h"
 
 #include <memory>
 #include <vector>
 #include <mutex>
 #include <algorithm>
 
+#define MODE SongbirdCore::PACKET
+
 class MockStream : public IStream {
 public:
-    MockStream() : peer(nullptr), open(true) {}
+    MockStream(std::string name) : protocol(std::make_shared<SongbirdCore>(name, MODE)), peer(nullptr), open(true) {
+        protocol->attachStream(this);
+        protocol->setMissingPacketTimeout(10);
+    }
+    ~MockStream() {
+
+    }
 
     void setPeer(MockStream* p) { peer = p; }
 
-    void enableReverse(bool rev) {
-        reverse = rev;
+    std::shared_ptr<SongbirdCore> getProtocol() {
+        return protocol;
     }
 
     void write(const uint8_t* buffer, std::size_t length) override {
         // Deliver bytes directly into peer's incoming buffer
         if (!peer) return;
-        if (!reverse) {
-            peer->incoming.insert(peer->incoming.end(), buffer, buffer + length);
-        } else {
-            // write to front of peer incoming buffer
-            peer->incoming.insert(peer->incoming.begin(), buffer, buffer + length);
-        }
+        peer->incoming.insert(peer->incoming.end(), buffer, buffer + length);
     }
 
-    std::size_t read(uint8_t* buffer, std::size_t length) override {
-        // single-threaded; no locking
-        std::size_t toRead = std::min(length, incoming.size());
-        if (toRead) {
-            std::memcpy(buffer, incoming.data(), toRead);
-            incoming.erase(incoming.begin(), incoming.begin() + toRead);
-        }
-        return toRead;
-    }
-
-    uint8_t available() override {
-        return static_cast<uint8_t>(std::min<size_t>(incoming.size(), 255));
+    void updateData() {
+        // Reads any available data from serial stream
+        std::size_t toRead = incoming.size();
+        if (toRead == 0) return;
+        protocol->parseData(incoming.data(), toRead);
+        incoming.clear();
     }
 
     bool isOpen() const override { return open; }
     void close() override { open = false; }
 
 private:
+    std::shared_ptr<SongbirdCore> protocol;
     MockStream* peer;
     std::vector<uint8_t> incoming;
     bool open;
-    bool reverse = false;
 };
 
-static std::pair<std::shared_ptr<RUDPCore>, std::shared_ptr<RUDPCore>> makeLinkedCores() {
-    auto s1 = std::make_shared<MockStream>();
-    auto s2 = std::make_shared<MockStream>();
+struct LinkedCores {
+    std::shared_ptr<MockStream> streamA;
+    std::shared_ptr<MockStream> streamB;
+    std::shared_ptr<SongbirdCore> coreA;
+    std::shared_ptr<SongbirdCore> coreB;
+};
+
+static LinkedCores makeLinkedCores() {
+    auto s1 = std::make_shared<MockStream>("A");
+    auto s2 = std::make_shared<MockStream>("B");
     s1->setPeer(s2.get());
     s2->setPeer(s1.get());
 
-    auto a = std::make_shared<RUDPCore>("A");
-    auto b = std::make_shared<RUDPCore>("B");
-    a->attachStream(s1);
-    b->attachStream(s2);
-    return {a, b};
+    auto a = s1->getProtocol();
+    auto b = s2->getProtocol();
+    return {s1, s2, a, b};
 }
 
 void setUp() {}
@@ -72,11 +74,11 @@ void tearDown() {}
 
 void test_basic_send_receive() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
 
-    std::shared_ptr<RUDPCore::Packet> received;
-    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
         received = pkt;
     });
 
@@ -85,8 +87,7 @@ void test_basic_send_receive() {
     a->sendPacket(pkt);
 
     // let B pull bytes and dispatch
-    b->updateData();
-
+    cores.streamB->updateData();
     TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "B should have received a packet");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x10, received->getHeader(), "Header mismatch");
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, received->getPayloadLength(), "Payload length");
@@ -95,13 +96,13 @@ void test_basic_send_receive() {
 
 void test_specific_handler() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
 
     uint8_t header = 0x10;
 
-    std::shared_ptr<RUDPCore::Packet> received;
-    b->setSpecificHandler(header, [&](std::shared_ptr<RUDPCore::Packet> pkt){
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setHeaderHandler(header, [&](std::shared_ptr<SongbirdCore::Packet> pkt){
         received = pkt;
     });
 
@@ -110,7 +111,7 @@ void test_specific_handler() {
     a->sendPacket(pkt);
 
     // let B pull bytes and dispatch
-    b->updateData();
+    cores.streamB->updateData();
 
     TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "B should have received a packet");
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x10, received->getHeader(), "Header mismatch");
@@ -123,20 +124,20 @@ void test_specific_handler() {
     a->sendPacket(pkt2);
 
     // let B pull bytes and dispatch
-    b->updateData();
+    cores.streamB->updateData();
 
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x10, received->getHeader(), "Handler should not have been called for different header");
 }
 
 void test_request_response() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
 
     const uint8_t REQ = 0x01;
     const uint8_t RESP = 0x02;
 
-    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
         if (pkt->getHeader() == REQ) {
             auto r = b->createPacket(RESP);
             r.writeByte(0x99);
@@ -148,9 +149,9 @@ void test_request_response() {
     a->sendPacket(req);
 
     // B processes request and sends response
-    b->updateData();
+    cores.streamB->updateData();
     // A receives response
-    a->updateData();
+    cores.streamA->updateData();
 
     auto resp = a->waitForHeader(RESP, 1000);
     TEST_ASSERT_NOT_NULL_MESSAGE(resp.get(), "A should receive a response");
@@ -163,71 +164,67 @@ void test_request_response() {
 
 void test_reliability_off() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
 
-    b->setReliabilityEnabled(false);
+    b->setAllowOutofOrder(true);
 
     std::vector<uint8_t> headers;
-    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
         headers.push_back(pkt->getHeader());
     });
 
-    // Send three packets in sequence
-    for (uint8_t h = 1; h <= 3; ++h) {
-        ((MockStream*)a->getStream().get())->enableReverse(h % 2 == 0);  // reverse every other packet to simulate out-of-order arrival
-        auto p = a->createPacket(h);
-        p.writeByte(h + 10);
-        a->sendPacket(p);
+    // Send three packets with out of order sequence numbers
+    uint8_t seqNums[3] = {1, 0, 2};
+    for (uint8_t i = 0; i < 3; ++i) {
+        auto p = a->createPacket(seqNums[i]);
+        p.writeByte(seqNums[i]);
+        a->sendPacket(p, seqNums[i]);
+        // Give B the bytes
+        cores.streamB->updateData();
     }
 
-    // Give B the bytes
-    b->updateData();
-    // Call update a few times to allow processing
-    for (int i = 0; i < 5; ++i) b->updateData();
-
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[2], "Third header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[0], "First header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[1], "Second header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, headers[2], "Third header");
 }
 
 void test_ordering_reliability() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
+
+    b->setAllowOutofOrder(false);
 
     std::vector<uint8_t> headers;
-    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
         headers.push_back(pkt->getHeader());
     });
 
-    // Send three packets in sequence
-    for (uint8_t h = 1; h <= 3; ++h) {
-        ((MockStream*)a->getStream().get())->enableReverse(h % 2 == 0);  // reverse every other packet to simulate out-of-order arrival
-        auto p = a->createPacket(h);
-        p.writeByte(h + 10);
-        a->sendPacket(p);
+    // Send three packets with out of order sequence numbers
+    // Has to start with zero otherwise needs extra updates
+    uint8_t seqNums[3] = {0, 2, 1};
+    for (uint8_t i = 0; i < 3; ++i) {
+        auto p = a->createPacket(seqNums[i]);
+        p.writeByte(seqNums[i]);
+        a->sendPacket(p, seqNums[i]);
+        // Give B the bytes
+        cores.streamB->updateData();
     }
-
-    // Give B the bytes
-    b->updateData();
-    // Call update a few times to allow ordering logic to run
-    for (int i = 0; i < 5; ++i) b->updateData();
-
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[2], "Third header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[0], "First header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[1], "Second header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(2, headers[2], "Third header");
 }
 
 void test_integer_payload() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
 
-    std::shared_ptr<RUDPCore::Packet> received;
-    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
         received = pkt;
     });
 
@@ -236,19 +233,19 @@ void test_integer_payload() {
     p.writeInt16(val);
     a->sendPacket(p);
 
-    b->updateData();
+    cores.streamB->updateData();
 
-    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Integer packet received");
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Integer packet not received");
     TEST_ASSERT_EQUAL_INT16_MESSAGE(val, received->readInt16(), "Int16 value mismatch");
 }
 
 void test_float_payload() {
     auto cores = makeLinkedCores();
-    auto a = cores.first;
-    auto b = cores.second;
+    auto a = cores.coreA;
+    auto b = cores.coreB;
 
-    std::shared_ptr<RUDPCore::Packet> received;
-    b->setReadHandler([&](std::shared_ptr<RUDPCore::Packet> pkt){
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
         received = pkt;
     });
 
@@ -257,9 +254,9 @@ void test_float_payload() {
     p.writeFloat(fv);
     a->sendPacket(p);
 
-    b->updateData();
+    cores.streamB->updateData();
 
-    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Float packet received");
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Float packet not received");
     float got = received->readFloat();
     // allow small epsilon
     TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0001f, fv, got, "Float value mismatch");

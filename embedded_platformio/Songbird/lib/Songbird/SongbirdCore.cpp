@@ -266,15 +266,17 @@ void SongbirdCore::setAllowOutofOrder(bool allow) {
 }
 
 void SongbirdCore::holdPacket(const Packet& packet) {
-    if (processMode != STREAM) return;
     std::vector<uint8_t> bytes = packet.toBytes(processMode);
     appendToWriteBuffer(bytes.data(), bytes.size());
 }
 
 void SongbirdCore::sendPacket(Packet& packet) {
+    sendPacket(packet, nextSeqNum.fetch_add(1));
+}
+void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum) {
     // Attaches sequence number if in packet mode
     if (processMode == PACKET) {
-        packet.setSequenceNum(nextSeqNum.fetch_add(1));
+        packet.setSequenceNum(sequenceNum);
     }
     holdPacket(packet);
     sendAll();
@@ -299,7 +301,7 @@ void SongbirdCore::sendAll() {
 }
 
 void SongbirdCore::parseData(const uint8_t* data, std::size_t length) {
-    parseData(data, length, "", 0);
+    parseData(data, length, IPAddress(), 0);
 }
 
 void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress remoteIP, uint16_t remotePort) {
@@ -307,23 +309,11 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
         // Parses full packet
         auto pkt = packetFromData(data, length);
         if (!pkt) return;
-        if (remoteIP != IPAddress()) {
-            pkt->setRemote(remoteIP, remotePort);
-        }
-        {
-            SpinLockGuard guard(dataSpinlock);
-            Remote remote = pkt->getRemote();
-            // If it is a new remote, add to remote order map
-            auto it = remoteOrders.find(remote);
-            if (it == remoteOrders.end()) {
-                RemoteOrder order {pkt->getSequenceNum(), false, 0};
-                remoteOrders[remote] = order;
-            }
-        }
+        pkt->setRemote(remoteIP, remotePort);
 
         std::vector<std::shared_ptr<Packet>> dispatch;
         if (allowOutofOrder) {
-            callHandlers(pkt);
+            dispatch.push_back(pkt);
             SpinLockGuard guard(dataSpinlock);
             // If any remaining packets in incoming packets add to dispatch
             for (const auto &p: incomingPackets) {
@@ -331,10 +321,17 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
             }
         } else {
             SpinLockGuard guard(dataSpinlock);
+            Remote remote = pkt->getRemote();
+            // If it is a new remote and ordering mode is on, add to remote order map
+            auto it = remoteOrders.find(remote);
+            if (it == remoteOrders.end()) {
+                RemoteOrder order {pkt->getSequenceNum(), false, 0};
+                remoteOrders[remote] = order;
+            }
             RemoteExpected expected{pkt->getRemote(), pkt->getSequenceNum()};
             incomingPackets[expected] = pkt;
 
-            auto dispatch = reorderPackets();
+            dispatch = reorderPackets();
         }
 
         // Call handlers on dispatched packets
@@ -342,13 +339,13 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
             callHandlers(p);
         }
     } else if (processMode == STREAM) {
+        // Adds data to readBuffer
+        appendToReadBuffer(data, length);
         // Process complete or incomplete packets in readBuffer
         while (true) {
             std::shared_ptr<Packet> pkt = packetFromStream();
             if (!pkt) break;
-            if (remoteIP != IPAddress()) {
-                pkt->setRemote(remoteIP, remotePort);
-            }
+            pkt->setRemote(remoteIP, remotePort);
             callHandlers(pkt);
         }
     }
@@ -356,9 +353,7 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
 
 std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t* data, std::size_t length) {
     std::shared_ptr<SongbirdCore::Packet> pkt;
-    if (length <= 2) {
-        return pkt;
-    }
+    if (length < 2) return pkt;
     // Parses packet
     uint8_t currHeader = data[0];
     uint8_t currSeqNum = data[1];
@@ -372,77 +367,82 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t
     return pkt;
 }
 
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets() {
+std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets()
+{
     SpinLockGuard guard(dataSpinlock);
     std::vector<std::shared_ptr<Packet>> dispatch;
-    // Process ordered packets from incomingPackets. If the expected packet
-    // doesn't arrive within the configured timeout, advance to the next
-    // available sequence to avoid blocking forever.
-    
-    // Keep processing while there's a packet matching expectedSeqNum.
-    for (const auto &p : remoteOrders) {
-        const Remote r = p.first;
-        RemoteOrder o = p.second;
-        while (true) {
-            RemoteExpected expected{r, o.expectedSeqNum};
-            auto it = incomingPackets.find(expected);
-            if (it != incomingPackets.end()) {
-                // move packet to dispatch list and remove from buffer
-                dispatch.push_back(it->second);
-                incomingPackets.erase(it);
-                o.expectedSeqNum++;
-                o.missingTimerActive = false;
+
+    // Iterating through remotes
+    for (auto itOrder = remoteOrders.begin(); itOrder != remoteOrders.end(); ++itOrder)
+    {
+        Remote r = itOrder->first;
+        RemoteOrder& order = itOrder->second;   // ← REFERENCE, not copy
+
+        while (true)
+        {
+            RemoteExpected key{ r, order.expectedSeqNum };
+            auto itPkt = incomingPackets.find(key);
+
+            // Checks for packet with correct sequence number
+            if (itPkt != incomingPackets.end())
+            {
+                dispatch.push_back(itPkt->second);
+                incomingPackets.erase(itPkt->first);
+                order.expectedSeqNum++;
+                order.missingTimerActive = false;
                 continue;
             }
 
-            // There are unexpected packets or no packets buffered. Start timer if not started
             unsigned long nowMs = millis();
-            if (!o.missingTimerActive) {
-                o.missingSinceMs = nowMs;
-                o.missingTimerActive = true;
-                break; // give more time for missing packet to arrive
-            }
 
-            auto elapsed = static_cast<int64_t>(nowMs - o.missingSinceMs);
-            if (elapsed < static_cast<int64_t>(missingPacketTimeoutMs)) {
-                // not timed out yet
+            // No packets with correct sequence, starting timeout
+            if (!order.missingTimerActive)
+            {
+                order.missingTimerActive = true;
+                order.missingSinceMs = nowMs;
                 break;
             }
+            
+            // Timer not yet expired
+            if ((nowMs - order.missingSinceMs) < missingPacketTimeoutMs)
+                break;
 
-            // timed out waiting for expectedSeqNum. Advance to the buffered
-            // sequence that is closest forward from expectedSeqNum (wraparound
-            // safe). Compute distance as unsigned subtraction so wraparound is
-            // handled correctly: dist = (uint8_t)(key - expectedSeqNum).
-            uint8_t bestKey = 0;
-            uint8_t bestDist = 0;
+            // Timeout: find nearest forward seqNum for this remote
             bool found = false;
-            for (const auto &p : incomingPackets) {
-                // If packet does not have the same remote ignore it
-                if (r != p.first.remote) continue;
-                uint8_t key = p.first.expectedSeqNum;
-                // distance forward from expectedSeqNum (0 means equal)
-                uint8_t dist = static_cast<uint8_t>(key - o.expectedSeqNum);
-                if (dist == 0) continue; // would have matched earlier
-                if (!found || dist < bestDist) {
-                    bestDist = dist;
-                    bestKey = key;
+            uint8_t bestDist = 0xFF;
+            uint8_t bestSeq = 0;
+
+            for (auto &p : incomingPackets)
+            {
+                if (p.first.remote != r) continue;
+
+                uint8_t seq = p.first.seqNum;
+                uint8_t dist = uint8_t(seq - order.expectedSeqNum);
+
+                if (dist == 0) continue;
+
+                if (!found || dist < bestDist)
+                {
                     found = true;
+                    bestDist = dist;
+                    bestSeq = seq;
                 }
             }
-            if (found) {
-                // advance expectedSeqNum to the closest available sequence
-                o.expectedSeqNum = bestKey;
-                o.missingTimerActive = false;
+
+            if (found)
+            {
+                order.expectedSeqNum = bestSeq;
+                order.missingTimerActive = false;
                 continue;
-            } else {
-                // no packets have been sent from the remote in a while
-                // so remove it to save memory
-                remoteOrders.erase(r);
-                remoteMap.erase(r);
-                break;
             }
+
+            // No packets for this remote — delete it safely
+            itOrder = remoteOrders.erase(itOrder);
+            remoteMap.erase(r);
+            break;
         }
     }
+
     return dispatch;
 }
 
@@ -456,11 +456,11 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStream() {
         newPacket = false;
     }
     // Do we have the full payload?
+    uint8_t currPayloadLen = readBuffer[1];
     if (readBuffer.size() < 2 + static_cast<std::size_t>(readBuffer[1])) return pkt;
     newPacket = true;
     // we have a full packet in readBuffer; construct it
     uint8_t currHeader = readBuffer[0];
-    uint8_t currPayloadLen = readBuffer[1];
 
     std::vector<uint8_t> payload;
     payload.insert(payload.end(), readBuffer.begin() + 2, readBuffer.begin() + 2 + currPayloadLen);
@@ -495,6 +495,7 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
     }
 
     if (headerHandler) headerHandler(pkt);
+    if (remoteHandler) remoteHandler(pkt);
     if (globalHandler) globalHandler(pkt);
 }
 
@@ -512,6 +513,11 @@ void SongbirdCore::flush() {
 std::size_t SongbirdCore::getReadBufferSize() {
     SpinLockGuard guard(dataSpinlock);
     return readBuffer.size();
+}
+
+std::size_t SongbirdCore::getNumIncomingPackets() {
+    SpinLockGuard guard(dataSpinlock);
+    return incomingPackets.size();
 }
 
 std::size_t SongbirdCore::getWriteBufferSize() {

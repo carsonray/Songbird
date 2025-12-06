@@ -44,10 +44,10 @@ class SongbirdCore {
 
         struct RemoteExpected {
             Remote remote;
-            uint8_t expectedSeqNum;
+            uint8_t seqNum;
 
             bool operator==(const RemoteExpected& o) const {
-                return expectedSeqNum == o.expectedSeqNum && remote == o.remote;
+                return seqNum == o.seqNum && remote == o.remote;
             }
         };
         
@@ -74,7 +74,7 @@ class SongbirdCore {
             size_t operator()(SongbirdCore::RemoteExpected const& r) const noexcept {
                 RemoteHasher rHasher;
                 auto h1 = rHasher(r.remote);
-                auto h2 = std::hash<uint8_t>()(r.expectedSeqNum);
+                auto h2 = std::hash<uint8_t>()(r.seqNum);
                 return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1<<6) + (h1>>2));
             }
         };
@@ -167,6 +167,8 @@ class SongbirdCore {
         // Whether out of order packets are allowed (less latency)
         void setAllowOutofOrder(bool allow);
 
+        std::size_t getNumIncomingPackets();
+
         ////////////////////////////////////////////
         // Specific to stream mode
         // Holds a packet in the write buffer
@@ -190,6 +192,7 @@ class SongbirdCore {
 
         // Sends a packet
         void sendPacket(Packet& packet);
+        void sendPacket(Packet& packet, uint8_t seqNum);
 
         // Parses data from stream
         void parseData(const uint8_t* data, std::size_t length);
