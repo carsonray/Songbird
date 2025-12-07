@@ -8,10 +8,10 @@
 #include "SongbirdCore.h"
 #include <AsyncUdp.h>
 
-class SongbirdUDPNode : public IStream {
+class SongbirdUDP : public IStream {
 public:
-    SongbirdUDPNode(std::string name);
-    ~SongbirdUDPNode() override;
+    SongbirdUDP(std::string name);
+    ~SongbirdUDP() override;
 
     // Start listen handler
     bool begin();

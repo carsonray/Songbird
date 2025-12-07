@@ -1,20 +1,20 @@
-#include "SongbirdUARTNode.h"
+#include "SongbirdUART.h"
 
-SongbirdUARTNode::SongbirdUARTNode(std::string name)
+SongbirdUART::SongbirdUART(std::string name)
     : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM)) {
         protocol->attachStream(this);
 }
 
-SongbirdUARTNode::~SongbirdUARTNode() {
+SongbirdUART::~SongbirdUART() {
     close();
 }
 
-bool SongbirdUARTNode::begin(unsigned int baudRate) {
+bool SongbirdUART::begin(unsigned int baudRate) {
     Serial.begin(baudRate);
     return true;
 }
 
-void SongbirdUARTNode::updateData() {
+void SongbirdUART::updateData() {
     // Reads any available data from serial stream
     std::size_t toRead = Serial.available();
     if (Serial && toRead > 0) {
@@ -26,18 +26,18 @@ void SongbirdUARTNode::updateData() {
     }
 }
 
-void SongbirdUARTNode::close() {
+void SongbirdUART::close() {
     Serial.end();
 }
 
-void SongbirdUARTNode::write(const uint8_t* buffer, std::size_t length) {
+void SongbirdUART::write(const uint8_t* buffer, std::size_t length) {
     Serial.write(buffer, length);
 }
 
-std::shared_ptr<SongbirdCore> SongbirdUARTNode::getProtocol() {
+std::shared_ptr<SongbirdCore> SongbirdUART::getProtocol() {
     return protocol;
 }
 
-bool SongbirdUARTNode::isOpen() const {
+bool SongbirdUART::isOpen() const {
     return Serial;
 }

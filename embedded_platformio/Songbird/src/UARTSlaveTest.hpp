@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <memory>
 #include "SongbirdCore.h"
-#include "SongbirdUARTNode.h"
+#include "SongbirdUART.h"
 
 #define SERIAL_BAUD 115200
 
@@ -12,7 +12,7 @@ TaskHandle_t testsTaskHandle = NULL;
 TaskHandle_t updateTaskHandler = NULL;
 
 //Serial node object
-SongbirdUARTNode uartNode("UART Node");
+SongbirdUART uart("UART Node");
 //Serial server protocol object
 std::shared_ptr<SongbirdCore> core;
 
@@ -21,8 +21,8 @@ void testsTask(void* pvParameters);
 void updateTask(void* pvParameters);
 
 void setup() {
-  core = uartNode.getProtocol();
-  uartNode.begin(SERIAL_BAUD);
+  core = uart.getProtocol();
+  uart.begin(SERIAL_BAUD);
 
   // Create RTOS tasks with appropriate priorities
   xTaskCreatePinnedToCore(
@@ -180,7 +180,7 @@ void testsTask(void* pvParameters) {
 
 void updateTask(void* pvParameters) {
   while (true) {
-    uartNode.updateData();
+    uart.updateData();
     vTaskDelay(1); // Yield to other tasks
   }
 }

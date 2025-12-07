@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <memory>
 #include "SongbirdCore.h"
-#include "SongbirdUDPNode.h"
+#include "SongbirdUDP.h"
 #include "WiFi.h"
 
 // Simple test runner that mirrors the unit tests but uses the hardware
@@ -15,7 +15,7 @@ TaskHandle_t testsTaskHandle = NULL;
 TaskHandle_t updateTaskHandler = NULL;
 
 //UDP node object
-SongbirdUDPNode udpNode("UDP Node");
+SongbirdUDP udp("UDP Node");
 //Protocol object
 std::shared_ptr<SongbirdCore> core;
 
@@ -24,7 +24,7 @@ void testsTask(void* pvParameters);
 void updateTask(void* pvParameters);
 
 void setup() {
-  core = udpNode.getProtocol();
+  core = udp.getProtocol();
 
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
@@ -39,7 +39,7 @@ void setup() {
   }
 
   // Begins listening on port
-  udpNode.listen(listenPort);
+  udp.listen(listenPort);
 
   // Create RTOS tasks with appropriate priorities
   xTaskCreatePinnedToCore(

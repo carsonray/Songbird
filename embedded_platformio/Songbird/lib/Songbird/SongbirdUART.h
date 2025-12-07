@@ -7,10 +7,10 @@
 #include "IStream.h"
 #include "SongbirdCore.h"
 
-class SongbirdUARTNode: public IStream {
+class SongbirdUART: public IStream {
 public:
-     SongbirdUARTNode(std::string name);
-    ~SongbirdUARTNode();
+     SongbirdUART(std::string name);
+    ~SongbirdUART();
 
     // Initialize and open the serial port
     bool begin(unsigned int baudRate);

@@ -1,18 +1,18 @@
-#include "SongbirdUDPNode.h"
+#include "SongbirdUDP.h"
 #include <cstring>
 
-SongbirdUDPNode::SongbirdUDPNode(std::string name)
+SongbirdUDP::SongbirdUDP(std::string name)
     : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM)), opened(false), broadcastMode(false), localPort(0)
 {
     protocol->attachStream(this);
     protocol->setMissingPacketTimeout(10);
 }
 
-SongbirdUDPNode::~SongbirdUDPNode() {
+SongbirdUDP::~SongbirdUDP() {
     close();
 }
 
-bool SongbirdUDPNode::begin() {
+bool SongbirdUDP::begin() {
     udp.onPacket([this](AsyncUDPPacket packet) {
         // Parse received data with protocol
         protocol->parseData(packet.data(), packet.length(), packet.remoteIP(), packet.remotePort());
@@ -21,16 +21,16 @@ bool SongbirdUDPNode::begin() {
     return true;
 }
 
-bool SongbirdUDPNode::listen(uint16_t port) {
+bool SongbirdUDP::listen(uint16_t port) {
     multicastMode = false;
     return udp.listen(port);
 }
-void SongbirdUDPNode::listenMulticast(const IPAddress &addr, uint16_t port) {
+void SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
     multicastMode = true;
     udp.listenMulticast(addr, port);
 }
 
-bool SongbirdUDPNode::setRemote(const IPAddress &addr, uint16_t port) {
+bool SongbirdUDP::setRemote(const IPAddress &addr, uint16_t port) {
     // Attempts to connect to remote
     remoteIP = addr;
     remotePort = port;
@@ -38,33 +38,33 @@ bool SongbirdUDPNode::setRemote(const IPAddress &addr, uint16_t port) {
     return udp.connect(addr, port);
 }
 
-void SongbirdUDPNode::setBroadcastMode(bool mode) {
+void SongbirdUDP::setBroadcastMode(bool mode) {
     this->broadcastMode = mode;
 }
 
-IPAddress SongbirdUDPNode::getRemoteIP() {
+IPAddress SongbirdUDP::getRemoteIP() {
     return remoteIP;
 }
 
-uint16_t SongbirdUDPNode::getRemotePort() {
+uint16_t SongbirdUDP::getRemotePort() {
     return remotePort;
 }
-uint16_t SongbirdUDPNode::getLocalPort() {
+uint16_t SongbirdUDP::getLocalPort() {
     return localPort;
 }
-std::shared_ptr<SongbirdCore> SongbirdUDPNode::getProtocol() {
+std::shared_ptr<SongbirdCore> SongbirdUDP::getProtocol() {
     return protocol;
 }
 
-bool SongbirdUDPNode::isBroadcast() {
+bool SongbirdUDP::isBroadcast() {
     return broadcastMode;
 }
 
-bool SongbirdUDPNode::isMulticast() {
+bool SongbirdUDP::isMulticast() {
     return multicastMode;
 }
 
-void SongbirdUDPNode::write(const uint8_t* buffer, std::size_t length) {
+void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
     if (!opened) return;
     if (!broadcastMode) {
         udp.write(buffer, length);
@@ -73,11 +73,11 @@ void SongbirdUDPNode::write(const uint8_t* buffer, std::size_t length) {
     }
 }
 
-bool SongbirdUDPNode::isOpen() const {
+bool SongbirdUDP::isOpen() const {
     return opened;
 }
 
-void SongbirdUDPNode::close() {
+void SongbirdUDP::close() {
     if (opened) {
         udp.close();
         opened = false;
