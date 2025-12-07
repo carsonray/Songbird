@@ -263,6 +263,17 @@ class SongbirdCore {
         // last packet received per remote (for waitForRemote)
         std::unordered_map<Remote, std::shared_ptr<SongbirdCore::Packet>, RemoteHasher> remoteMap;
 
+        // Internal waiter object used to avoid missed notifications
+        struct Waiter {
+            std::mutex mtx;
+            std::condition_variable cv;
+            std::atomic<bool> signalled{false};
+        };
+
+        // Waiter registries (per-header and per-remote) to support multiple concurrent waiters
+        std::unordered_map<uint8_t, std::vector<std::shared_ptr<Waiter>>> headerWaiters;
+        std::unordered_map<Remote, std::vector<std::shared_ptr<Waiter>>, RemoteHasher> remoteWaiters;
+
         // Timer thread and synchronization for desktop missing-packet timeout handling
         std::thread missingTimerThread;
         std::mutex missingTimerMutex;

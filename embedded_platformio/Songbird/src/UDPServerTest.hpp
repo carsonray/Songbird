@@ -6,8 +6,8 @@
 
 // Simple test runner that mirrors the unit tests but uses the hardware
 
-const char *ssid = "***********";
-const char *password = "***********";
+const char *ssid = "******";
+const char *password = "******";
 const uint16_t listenPort = 8080;
 
 // RTOS Task Handles

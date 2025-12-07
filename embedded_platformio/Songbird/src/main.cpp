@@ -1,2 +1,2 @@
 // Test switcher
-#include "UARTSlaveTest.hpp"
+#include "UDPServerTest.hpp"

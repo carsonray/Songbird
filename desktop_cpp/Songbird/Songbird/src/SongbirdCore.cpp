@@ -161,7 +161,7 @@ SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode)
         while (!missingTimerThreadStop.load()) {
             // Sleep for a short interval, or until signalled
             std::unique_lock<std::mutex> lk(missingTimerMutex);
-            missingTimerCv.wait_for(lk, 10ms, [this]() { return missingTimerThreadStop.load(); });
+            missingTimerCv.wait_for(lk, std::chrono::milliseconds(missingPacketTimeoutMs), [this]() { return missingTimerThreadStop.load(); });
             if (missingTimerThreadStop.load()) break;
 
             // Collect remotes whose missing timer expired
@@ -232,9 +232,9 @@ void SongbirdCore::clearRemoteHandler(boost::asio::ip::address remoteIP, uint16_
 }
 
 std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header, uint32_t timeoutMs) {
+    // First check if packet already present
     {
         std::lock_guard<std::mutex> lock(dataMutex);
-        // check if we already have a header
         auto it = headerMap.find(header);
         if (it != headerMap.end()) {
             auto pkt = it->second;
@@ -242,16 +242,30 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
             return pkt;
         }
     }
-    // wait for condition variable to be signalled with that header
+
+    // Not present: register waiter object and wait on its own cv
+    auto waiter = std::make_shared<Waiter>();
     {
-        std::unique_lock<std::mutex> lock2(waitMutex);
-        bool got = waitCv.wait_for(lock2, std::chrono::milliseconds(timeoutMs), [&]() {
-		    std::lock_guard<std::mutex> lock(dataMutex);
-            return headerMap.find(header) != headerMap.end();
-        });
-        if (!got) return nullptr;
+        std::lock_guard<std::mutex> wlock(waitMutex);
+        headerWaiters[header].push_back(waiter);
     }
-	std::lock_guard<std::mutex> lock3(dataMutex);
+
+    std::unique_lock<std::mutex> lk(waiter->mtx);
+    bool got = waiter->cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&]() {
+        return waiter->signalled.load();
+    });
+
+    // unregister waiter
+    {
+        std::lock_guard<std::mutex> wlock(waitMutex);
+        auto &vec = headerWaiters[header];
+        vec.erase(std::remove(vec.begin(), vec.end(), waiter), vec.end());
+        if (vec.empty()) headerWaiters.erase(header);
+    }
+
+    if (!got) return nullptr;
+
+    std::lock_guard<std::mutex> lock3(dataMutex);
     auto pkt = headerMap[header];
     headerMap.erase(header);
     return pkt;
@@ -259,9 +273,9 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
 
 std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForRemote(boost::asio::ip::address remoteIP, uint16_t remotePort, uint32_t timeoutMs) {
     Remote remote{ remoteIP, remotePort };
+    // First check if packet already present
     {
         std::lock_guard<std::mutex> lock(dataMutex);
-        // check if we already have a header
         auto it = remoteMap.find(remote);
         if (it != remoteMap.end()) {
             auto pkt = it->second;
@@ -269,15 +283,30 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForRemote(boost::asio::i
             return pkt;
         }
     }
-    // wait for condition variable to be signalled with that header
+
+    // Not present: register waiter object and wait on its own cv
+    auto waiter = std::make_shared<Waiter>();
     {
-        std::unique_lock<std::mutex> lock2(waitMutex);
-        bool got = waitCv.wait_for(lock2, std::chrono::milliseconds(timeoutMs), [&]() {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            return remoteMap.find(remote) != remoteMap.end();
-            });
-        if (!got) return nullptr;
+        std::lock_guard<std::mutex> wlock(waitMutex);
+        remoteWaiters[remote].push_back(waiter);
     }
+
+    std::unique_lock<std::mutex> lk(waiter->mtx);
+    bool got = waiter->cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&]() {
+        std::lock_guard<std::mutex> lock(dataMutex);
+        return waiter->signalled.load();
+    });
+
+    // unregister waiter
+    {
+        std::lock_guard<std::mutex> wlock(waitMutex);
+        auto &vec = remoteWaiters[remote];
+        vec.erase(std::remove(vec.begin(), vec.end(), waiter), vec.end());
+        if (vec.empty()) remoteWaiters.erase(remote);
+    }
+
+    if (!got) return nullptr;
+
     std::lock_guard<std::mutex> lock3(dataMutex);
     auto pkt = remoteMap[remote];
     remoteMap.erase(remote);
@@ -555,7 +584,7 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
 
         auto it = headerHandlers.find(header);
         if (it != headerHandlers.end()) headerHandler = it->second;
-        // update header map
+        // update header map (single latest packet)
         headerMap[header] = pkt;
 
         auto it2 = remoteHandlers.find(remote);
@@ -566,8 +595,29 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
         globalHandler = readHandler;
     }
 
-    // Notify waiters
-    waitCv.notify_all();
+    // Notify one specific waiter (if any) for header and remote
+    {
+        std::lock_guard<std::mutex> wlock(waitMutex);
+        auto hit = headerWaiters.find(header);
+        if (hit != headerWaiters.end() && !hit->second.empty()) {
+            // notify the first registered waiter for this header
+            std::shared_ptr<Waiter> waiter = hit->second.front();
+            {
+                std::lock_guard<std::mutex> lk(waiter->mtx);
+                waiter->signalled.store(true);
+                waiter->cv.notify_one();
+            }
+        }
+        auto rit = remoteWaiters.find(remote);
+        if (rit != remoteWaiters.end() && !rit->second.empty()) {
+            std::shared_ptr<Waiter> waiter = rit->second.front();
+            {
+                std::lock_guard<std::mutex> lk(waiter->mtx);
+                waiter->signalled.store(true);
+                waiter->cv.notify_one();
+            }
+        }
+    }
 
     if (headerHandler) headerHandler(pkt);
     if (remoteHandler) remoteHandler(pkt);
