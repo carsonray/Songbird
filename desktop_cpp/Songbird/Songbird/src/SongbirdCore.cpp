@@ -246,7 +246,7 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
     {
         std::unique_lock<std::mutex> lock2(waitMutex);
         bool got = waitCv.wait_for(lock2, std::chrono::milliseconds(timeoutMs), [&]() {
-		std::lock_guard<std::mutex> lock(dataMutex);
+		    std::lock_guard<std::mutex> lock(dataMutex);
             return headerMap.find(header) != headerMap.end();
         });
         if (!got) return nullptr;
@@ -565,6 +565,9 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
 
         globalHandler = readHandler;
     }
+
+    // Notify waiters
+    waitCv.notify_all();
 
     if (headerHandler) headerHandler(pkt);
     if (remoteHandler) remoteHandler(pkt);

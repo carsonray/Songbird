@@ -21,7 +21,7 @@
 #define SERIAL_BAUD_RATE 115200
 
 //Serial node object
-SongbirdUART uartNode("UART Node");
+SongbirdUART uart("UART Node");
 //Serial server protocol object
 std::shared_ptr<SongbirdCore> core;
 
@@ -134,10 +134,10 @@ static bool run_float_payload() {
 
 int main() {
     // Gets data protocol
-    core = uartNode.getProtocol();
+    core = uart.getProtocol();
 
     // Begins connection
-    uartNode.begin(SERIAL_PORT, SERIAL_BAUD_RATE);
+    uart.begin(SERIAL_PORT, SERIAL_BAUD_RATE);
 
     waitForPing();
 
