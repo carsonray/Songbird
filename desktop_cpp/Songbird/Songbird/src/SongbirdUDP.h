@@ -14,8 +14,8 @@ public:
     SongbirdUDP(std::string name);
     ~SongbirdUDP();
 
-    bool begin();
-    bool listen(unsigned short listenPort, std::shared_ptr<SongbirdCore> protocol);
+    bool begin(unsigned short listenPort);
+    bool listen(unsigned short listenPort);
     void listenMulticast(const boost::asio::ip::address &addr, uint16_t port);
     bool setRemote(const boost::asio::ip::address &addr, uint16_t port);
     void setBroadcastMode(bool mode);
@@ -31,6 +31,7 @@ public:
     using StreamHandler = std::function<void(const boost::system::error_code&, std::size_t)>;
 
     bool isOpen() const override;
+    void closeSocket();
     void close() override;
 
     // write helper matching embedded API (sends to configured remote)
@@ -51,7 +52,6 @@ private:
     std::atomic<bool> asyncActive{false};
 
     std::shared_ptr<SongbirdCore> protocol;
-    bool opened{false};
     bool broadcastMode{false};
     bool multicastMode{false};
     boost::asio::ip::address remoteIP;

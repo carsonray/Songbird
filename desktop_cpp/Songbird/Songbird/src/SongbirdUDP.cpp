@@ -4,7 +4,7 @@
 #include <cstring>
 
 SongbirdUDP::SongbirdUDP(std::string name)
-    : socket(std::make_shared<boost::asio::ip::udp::socket>(ioContext)), protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::PACKET)), opened(false), broadcastMode(false), multicastMode(false), localPort(0)
+    : socket(std::make_shared<boost::asio::ip::udp::socket>(ioContext)), protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::PACKET)), broadcastMode(false), multicastMode(false), localPort(0)
 {
     protocol->attachStream(this);
     protocol->setMissingPacketTimeout(10);
@@ -12,28 +12,24 @@ SongbirdUDP::SongbirdUDP(std::string name)
 
 SongbirdUDP::~SongbirdUDP() {
     // ensure we stop async operations and threads
-    asyncActive.store(false);
-    if (socket && socket->is_open()) {
-        boost::system::error_code ec;
-        socket->close(ec);
-    }
-    ioContext.stop();
-    if (ioThread.joinable()) ioThread.join();
+    close();
 }
 
 std::shared_ptr<boost::asio::ip::udp::socket> SongbirdUDP::getSocket() {
     return socket;
 }
 
-void SongbirdUDP::close() {
+void SongbirdUDP::closeSocket() {
     asyncActive.store(false);
     if (socket && socket->is_open()) {
         boost::system::error_code ec;
         socket->close(ec);
     }
+}
+void SongbirdUDP::close() {
+    closeSocket();
     ioContext.stop();
     if (ioThread.joinable()) ioThread.join();
-    opened = false;
 }
 
 void SongbirdUDP::startAsyncReadLoop() {
@@ -56,38 +52,22 @@ void SongbirdUDP::startAsyncReadLoop() {
     });
 }
 
-bool SongbirdUDP::begin() {
-    try {
-        // open UDP socket with IPv4 and bind to any port
-        socket->open(boost::asio::ip::udp::v4());
-        ioThread = std::thread([this]() { ioContext.run(); });
-        asyncActive.store(true);
-        startAsyncReadLoop();
-        opened = true;
-        return true;
-    }
-    catch (std::exception& e) {
-        std::cerr << "UDP begin error: " << e.what() << std::endl;
-        return false;
-    }
+bool SongbirdUDP::begin(unsigned short listenPort) {
+    ioThread = std::thread([this]() { ioContext.run(); });
+    return listen(listenPort);
 }
 
-bool SongbirdUDP::listen(unsigned short listenPort, std::shared_ptr<SongbirdCore> proto) {
+bool SongbirdUDP::listen(unsigned short listenPort) {
     try {
+		// Close socket if already open
+        closeSocket();
         boost::asio::ip::udp::endpoint listenEndpoint(boost::asio::ip::udp::v4(), listenPort);
         socket->open(boost::asio::ip::udp::v4());
         socket->bind(listenEndpoint);
         localPort = listenPort;
 
-        if (proto) {
-            protocol = proto;
-            protocol->attachStream(this);
-        }
-
-        ioThread = std::thread([this]() { ioContext.run(); });
         asyncActive.store(true);
         startAsyncReadLoop();
-        opened = true;
         return true;
     }
     catch (std::exception& e) {
@@ -99,7 +79,7 @@ bool SongbirdUDP::listen(unsigned short listenPort, std::shared_ptr<SongbirdCore
 void SongbirdUDP::listenMulticast(const boost::asio::ip::address &addr, uint16_t port) {
     // For desktop, treat same as listen (multicast join not implemented here)
     multicastMode = true;
-    listen(port, protocol);
+    listen(port);
 }
 
 bool SongbirdUDP::setRemote(const boost::asio::ip::address &addr, uint16_t port) {
@@ -144,7 +124,7 @@ bool SongbirdUDP::isMulticast() {
 }
 
 void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
-    if (!opened) return;
+    if (!socket || !socket->is_open()) return;
     if (!broadcastMode) {
         if (defaultRemoteEndpoint.address().is_unspecified()) return;
         socket->async_send_to(boost::asio::buffer(buffer, length), defaultRemoteEndpoint, [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
@@ -160,7 +140,7 @@ void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
 }
 
 bool SongbirdUDP::isOpen() const {
-    return opened;
+    return socket && socket->is_open();
 }
 
 boost::asio::ip::udp::endpoint SongbirdUDP::getLastRemoteEndpoint() const {

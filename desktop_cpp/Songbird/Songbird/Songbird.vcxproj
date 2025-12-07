@@ -127,12 +127,14 @@
     <ClInclude Include="src\SongbirdCore.h" />
     <ClInclude Include="src\SongbirdUART.h" />
     <ClInclude Include="src\SongbirdUDP.h" />
+    <ClInclude Include="test\UARTMasterTest.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\SongbirdCore.cpp" />
     <ClCompile Include="src\SongbirdUART.cpp" />
     <ClCompile Include="src\SongbirdUDP.cpp" />
+    <ClCompile Include="test\UDPClientTest.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

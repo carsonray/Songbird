@@ -6,9 +6,13 @@
 
 // Simple test runner that mirrors the unit tests but uses the hardware
 
-const char *ssid = "******";
-const char *password = "******";
+const char *ssid = "*****";
+const char *password = "*****";
 const uint16_t listenPort = 8080;
+
+//Remote endpoint configuration
+const char *remoteIP = "143.215.191.136";
+const uint16_t remotePort = 8080;
 
 // RTOS Task Handles
 TaskHandle_t testsTaskHandle = NULL;
@@ -36,10 +40,24 @@ void setup() {
     }
   } else {
     Serial.println("WiFi connected");
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("MAC Address: ");
+    Serial.println(WiFi.macAddress());
   }
 
   // Begins listening on port
   udp.listen(listenPort);
+  udp.begin();
+  Serial.print("Listening on UDP port: ");
+  Serial.println(listenPort);
+
+  // Configures remote endpoint
+  //udp.setRemote(IPAddress().fromString(remoteIP), remotePort);
+  Serial.print("Remote IP: ");
+  Serial.println(remoteIP);
+  Serial.print("Remote Port: ");
+  Serial.println(remotePort);
 
   // Create RTOS tasks with appropriate priorities
   xTaskCreatePinnedToCore(
@@ -55,21 +73,25 @@ void setup() {
 
 static void waitForPing()
 {
+  Serial.print("Waiting for ping");
   std::shared_ptr<SongbirdCore::Packet> response = nullptr;
   while (!response) {
     response = core->waitForHeader(0xFF, 1000); // Wait for ping
-    core->flush();
+    Serial.print(".");
   }
+  Serial.println("\nPing received — sending ping response");
   // Sends ping
   auto pkt = core->createPacket(0xFF);
   core->sendPacket(pkt);
 }
 
 static bool run_basic_send_receive() {
+  Serial.println("Test: basic send/receive");
   bool ok = false;
   core->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
     if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
       ok = true;
+      Serial.println("  basic_send_receive: matched packet, sending echo");
       auto pkt = core->createPacket(0x10);
       pkt.writeByte(0x42);
       core->sendPacket(pkt);
@@ -80,31 +102,37 @@ static bool run_basic_send_receive() {
   while (!ok && millis() - start < 2000) {
     vTaskDelay(1);
   }
+  Serial.print("  basic_send_receive: ");
+  Serial.println(ok ? "PASS" : "FAIL");
   return ok;
 }
 
 static bool run_specific_handler() {
+    Serial.println("Test: specific handler");
     bool ok = false;
     core->setHeaderHandler(0x10, [&](std::shared_ptr<SongbirdCore::Packet> pkt) {
         if (!pkt) return;
         if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
             ok = true;
+            Serial.println("  specific_handler: matched handler, replying");
             auto pkt = core->createPacket(0x10);
             pkt.writeByte(0x42);
             core->sendPacket(pkt);
         }
-        });
+    });
 
     unsigned long start = millis();
     while (!ok && millis() - start < 2000) {
       vTaskDelay(1);
     }
 
-	  if (!ok) return false;
+    if (!ok) {
+      Serial.println("  specific_handler: initial match FAIL");
+      return false;
+    }
 
-    //Additional random packet to test handler specificity
+    // Additional random packet to test handler specificity
     ok = false;
-
     auto pkt2 = core->createPacket(0x11);
     pkt2.writeByte(0x42);
     core->sendPacket(pkt2);
@@ -114,12 +142,19 @@ static bool run_specific_handler() {
       vTaskDelay(1);
     }
 
+    Serial.print("  specific_handler: ");
+    Serial.println(!ok ? "PASS" : "FAIL (handler matched unexpected packet)");
     return !ok;
 }
 
 static bool run_request_response() {
+  Serial.println("Test: request/response");
   // Waits for request
   auto request = core->waitForHeader(0x01, 2000);
+  if (!request) {
+    Serial.println("  request_response: FAIL (no request)");
+    return false;
+  }
 
   // Checks data
   bool gotRequest = (request->getHeader() == 0x01 && request->getPayloadLength() == 0);
@@ -129,30 +164,58 @@ static bool run_request_response() {
   r.writeByte(0x99);
   core->sendPacket(r);
 
+  Serial.print("  request_response: ");
+  Serial.println(gotRequest ? "PASS" : "FAIL (bad payload)");
   return gotRequest;
 }
 
 static bool run_integer_payload() {
+  Serial.println("Test: integer payload");
   auto request = core->waitForHeader(0x30, 2000);
-  if (!request) return false;
-  if (request->getHeader() != 0x30 || request->getPayloadLength() != 2) return false;
+  if (!request) {
+    Serial.println("  integer_payload: FAIL (no request)");
+    return false;
+  }
+  if (request->getHeader() != 0x30 || request->getPayloadLength() != 2) {
+    Serial.println("  integer_payload: FAIL (header/length mismatch)");
+    return false;
+  }
   int16_t v = request->readInt16();
-  if (v != -12345) return false;
+  if (v != -12345) {
+    Serial.print("  integer_payload: FAIL (value=");
+    Serial.print(v);
+    Serial.println(")");
+    return false;
+  }
   auto resp = core->createPacket(0x30);
   resp.writeInt16(-12345);
   core->sendPacket(resp);
+  Serial.println("  integer_payload: PASS");
   return true;
 }
 
 static bool run_float_payload() {
+  Serial.println("Test: float payload");
   auto request = core->waitForHeader(0x31, 2000);
-  if (!request) return false;
-  if (request->getHeader() != 0x31 || request->getPayloadLength() != 4) return false;
+  if (!request) {
+    Serial.println("  float_payload: FAIL (no request)");
+    return false;
+  }
+  if (request->getHeader() != 0x31 || request->getPayloadLength() != 4) {
+    Serial.println("  float_payload: FAIL (header/length mismatch)");
+    return false;
+  }
   float v = request->readFloat();
-  if (fabs(v - 3.14159f) >= 0.0002f) return false;
+  if (fabs(v - 3.14159f) >= 0.0002f) {
+    Serial.print("  float_payload: FAIL (value=");
+    Serial.print(v);
+    Serial.println(")");
+    return false;
+  }
   auto resp = core->createPacket(0x31);
   resp.writeFloat(3.14159f);
   core->sendPacket(resp);
+  Serial.println("  float_payload: PASS");
   return true;
 }
 
@@ -161,23 +224,44 @@ void testsTask(void* pvParameters) {
 
   bool pass = true;
 
-  pass &= run_basic_send_receive();
+  Serial.println("Starting test sequence");
+  bool r = run_basic_send_receive();
+  pass &= r;
+
+  Serial.print("Result - basic_send_receive: ");
+  Serial.println(r ? "PASS" : "FAIL");
 
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  pass &= run_specific_handler();
+
+  r = run_specific_handler();
+  pass &= r;
+  Serial.print("Result - specific_handler: ");
+  Serial.println(r ? "PASS" : "FAIL");
 
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  pass &= run_request_response();
+
+  r = run_request_response();
+  pass &= r;
+  Serial.print("Result - request_response: ");
+  Serial.println(r ? "PASS" : "FAIL");
 
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  pass &= run_integer_payload();
+
+  r = run_integer_payload();
+  pass &= r;
+  Serial.print("Result - integer_payload: ");
+  Serial.println(r ? "PASS" : "FAIL");
 
   vTaskDelay(pdMS_TO_TICKS(200));
   
-  pass &= run_float_payload();
+
+  r = run_float_payload();
+  pass &= r;
+  Serial.print("Result - float_payload: ");
+  Serial.println(r ? "PASS" : "FAIL");
 
   auto pkt = core->createPacket(0x00);
   pkt.writeByte(pass ? 0x01 : 0x00);
