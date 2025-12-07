@@ -125,20 +125,14 @@
   <ItemGroup>
     <ClInclude Include="src\IStream.h" />
     <ClInclude Include="src\SongbirdCore.h" />
-    <ClInclude Include="src\SongbirdUARTNode.h" />
-    <ClInclude Include="src\SongbirdUDPClient.h" />
-    <ClInclude Include="src\SongbirdUDPServer.h" />
-    <ClInclude Include="src\UARTStream.h" />
-    <ClInclude Include="src\UDPStream.h" />
+    <ClInclude Include="src\SongbirdUART.h" />
+    <ClInclude Include="src\SongbirdUDP.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\SongbirdCore.cpp" />
-    <ClCompile Include="src\SongbirdUARTNode.cpp" />
-    <ClCompile Include="src\SongbirdUDPClient.cpp" />
-    <ClCompile Include="src\SongbirdUDPServer.cpp" />
-    <ClCompile Include="src\UARTStream.cpp" />
-    <ClCompile Include="src\UDPStream.cpp" />
+    <ClCompile Include="src\SongbirdUART.cpp" />
+    <ClCompile Include="src\SongbirdUDP.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

@@ -21,19 +21,10 @@
     <ClInclude Include="src\SongbirdCore.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\SongbirdUARTNode.h">
+    <ClInclude Include="src\SongbirdUART.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\UARTStream.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="src\UDPStream.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="src\SongbirdUDPClient.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="src\SongbirdUDPServer.h">
+    <ClInclude Include="src\SongbirdUDP.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -44,19 +35,10 @@
     <ClCompile Include="src\SongbirdCore.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\SongbirdUARTNode.cpp">
+    <ClCompile Include="src\SongbirdUART.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\UARTStream.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\UDPStream.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\SongbirdUDPClient.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\SongbirdUDPServer.cpp">
+    <ClCompile Include="src\SongbirdUDP.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

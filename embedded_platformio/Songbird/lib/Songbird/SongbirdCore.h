@@ -1,4 +1,3 @@
-// ...existing code...
 #ifndef SONGBIRD_CORE_H
 #define SONGBIRD_CORE_H
 
@@ -229,6 +228,8 @@ class SongbirdCore {
         // does not arrive within this window, the core will advance to the
         // next available sequence to avoid blocking forever.
         uint32_t missingPacketTimeoutMs;
+
+        uint64_t lastDataTimeMs = 0;
 
         // Handlers by remotes
         std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;

@@ -1,4 +1,3 @@
-// ...existing code...
 #ifndef SONGBIRD_CORE_H
 #define SONGBIRD_CORE_H
 
@@ -8,6 +7,8 @@
 #include <cstring>
 #include <iostream>
 #include <unordered_map>
+#include <boost/asio.hpp>
+#include <memory>
 #include <thread>
 #include <queue>
 #include <functional>
@@ -18,22 +19,83 @@
 
 class SongbirdCore {
     public:
+        enum ProcessMode {
+            STREAM,
+            PACKET
+        };
+
+        struct Remote {
+            boost::asio::ip::address ip;
+            uint16_t port;
+
+            bool operator==(const Remote& o) const {
+                return ip == o.ip && port == o.port;
+            }
+            bool operator!=(const Remote& o) const {
+                return !(*this == o);
+            }
+        };
+
+        struct RemoteExpected {
+            Remote remote;
+            uint8_t seqNum;
+
+            bool operator==(const RemoteExpected& o) const {
+                return seqNum == o.seqNum && remote == o.remote;
+            }
+            bool operator!=(const RemoteExpected& o) const {
+                return !(*this == o);
+            }
+        };
+
+        struct RemoteOrder {
+            uint8_t expectedSeqNum;
+            bool missingTimerActive = false;
+            // Desktop timer: store the time point when the missing timer was started
+            std::chrono::steady_clock::time_point missingTimerStart = std::chrono::steady_clock::time_point::min();
+        };
+
+        // Custom hash functor
+        struct RemoteHasher {
+            size_t operator()(SongbirdCore::Remote const& r) const noexcept {
+                // combine ip and port into a size_t
+                return std::hash<std::string>()(r.ip.to_string()) ^ (static_cast<size_t>(r.port) << 1);
+            }
+        };
+
+        struct RemoteExpectedHasher {
+            size_t operator()(SongbirdCore::RemoteExpected const& r) const noexcept {
+                RemoteHasher rHasher;
+                auto h1 = rHasher(r.remote);
+                auto h2 = std::hash<uint8_t>()(r.seqNum);
+                return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+            }
+        };
+
         class Packet {
         public:
             // Creates blank packet
-            Packet();
-            // Creates packet with header and sequence number
-            Packet(uint8_t sequenceNum, uint8_t header);
+            Packet(uint8_t header);
             // Creates packet with a payload
-            Packet(uint8_t sequenceNum, uint8_t header, const std::vector<uint8_t>& payload);
+            Packet(uint8_t header, const std::vector<uint8_t>& payload);
 
             // Converts packet to byte vector for transmission
-            std::vector<uint8_t> toBytes() const;
+            std::vector<uint8_t> toBytes(SongbirdCore::ProcessMode mode) const;
 
-            int64_t getSequenceNum() const;
+            // Sets sequence number
+            void setSequenceNum(uint8_t seqNum);
+
             uint8_t getHeader() const;
+            uint8_t getSequenceNum() const;
+            std::vector<uint8_t> getPayload() const;
             std::size_t getPayloadLength() const;
             std::size_t getRemainingBytes() const;
+
+            // Remote info (for server mode responses)
+            void setRemote(const boost::asio::ip::address &ip, uint16_t port);
+            Remote getRemote() const;
+            boost::asio::ip::address getRemoteIP() const;
+            uint16_t getRemotePort() const;
 
             // Writing functions
             void writeBytes(const uint8_t* buffer, std::size_t length);
@@ -53,117 +115,159 @@ class SongbirdCore {
             T readData();
 
         private:
-            uint8_t sequenceNum;
             uint8_t header;
+            uint8_t sequenceNum;
             std::size_t payloadLength;
             std::vector<uint8_t> payload;
             // read cursor into payload
             mutable std::size_t readPos = 0;
+
+            // Remote info (for server mode responses)
+            boost::asio::ip::address remoteIP;
+            uint16_t remotePort = 0;
         };
 
         using ReadHandler = std::function<void(std::shared_ptr<SongbirdCore::Packet>)>;
 
-        SongbirdCore(std::string name);
+        SongbirdCore(std::string name, ProcessMode mode = PACKET);
         ~SongbirdCore();
-
-        // Attaches a stream to the protocol
-        void attachStream(std::shared_ptr<IStream> stream);
 
         //Sets general read handler (invoked for all incoming packets)
         void setReadHandler(ReadHandler handler);
 
-        // Attach a response handler for packets with a particular header
-        void setSpecificHandler(uint8_t header, ReadHandler handler);
-        void clearSpecificHandler(uint8_t header);
+        // Attach a handler for packets with a particular header
+        void setHeaderHandler(uint8_t header, ReadHandler handler);
+        void clearHeaderHandler(uint8_t header);
 
-        // Blocking wait for a response packet with the given header (returns nullptr on timeout)
+        // Attach a handler for packets with a particular remote source
+        void setRemoteHandler(boost::asio::ip::address remoteIP, uint16_t remotePort, ReadHandler hander);
+        void clearRemoteHandler(boost::asio::ip::address remoteIP, uint16_t remotePort);
+
+        // Blocking wait for a packet with the given header (returns nullptr on timeout)
         std::shared_ptr<Packet> waitForHeader(uint8_t header, uint32_t timeoutMs);
+        // Blocking wait for a packet with the given remote (returns nullptr on timeout)
+        std::shared_ptr<Packet> waitForRemote(boost::asio::ip::address remoteIP, uint16_t remotePort, uint32_t timeoutMs);
 
-        // Gets stream object
-        std::shared_ptr<IStream> getStream();
+        // Attaches stream object
+        void attachStream(IStream* stream);
 
-        // Creates a blank packet with a specified header
-        Packet createPacket(uint8_t header);
+        ////////////////////////////////////////////
+        // Specific to packet mode
 
-        // Sends a packet
-        void sendPacket(const Packet& packet);
+        // Configure missing-packet timeout (ms)
+        void setMissingPacketTimeout(uint32_t ms);
+        void onMissingTimeout(const Remote remote);
 
+        // Whether out of order packets are allowed (less latency)
+        void setAllowOutofOrder(bool allow);
+
+        std::size_t getNumIncomingPackets();
+
+        ////////////////////////////////////////////
+        // Specific to stream mode
         // Holds a packet in the write buffer
         void holdPacket(const Packet& packet);
 
         // Sends all data in write buffer
         void sendAll();
 
-        // Fetches data from stream and processes packets
-        void updateData();
-
-        // Configure missing-packet timeout (ms)
-        void setMissingPacketTimeout(uint32_t ms);
-
-        // Reliability control: when disabled, incoming packets are dispatched
-        // immediately as parsed (no ordering or timeout applied).
-        void setReliabilityEnabled(bool enabled);
-        bool isReliabilityEnabled() const;
-
         // Flushes all buffers
         void flush();
 
+        // Gets buffer sizes
         std::size_t getReadBufferSize();
         std::size_t getWriteBufferSize();
 
-        // Buffer management
-        void appendToReadBuffer(const uint8_t* data, std::size_t length);
-        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
+        //////////////////////////////////////////////
+        // Both modes
+
+        // Creates a new packet
+        Packet createPacket(uint8_t header);
+
+        // Sends a packet
+        void sendPacket(Packet& packet);
+        void sendPacket(Packet& packet, uint8_t seqNum);
+
+        // Parses data from stream
+        void parseData(const uint8_t* data, std::size_t length);
+        void parseData(const uint8_t* data, std::size_t length, boost::asio::ip::address remoteIP, uint16_t remotePort);
 
     private:
+        SongbirdCore* self;
         std::string name;
-        std::shared_ptr<IStream> stream;
+        IStream* stream;
         std::vector<uint8_t> readBuffer;
         std::vector<uint8_t> writeBuffer;
-        std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> incomingPackets;
+
+        //Process mode
+        ProcessMode processMode;
+
+        ///////////////////////////////////////
+        // Specific to packet mode
+
+        std::unordered_map<RemoteExpected, std::shared_ptr<SongbirdCore::Packet>, RemoteExpectedHasher> incomingPackets;
 
         // Outgoing packet sequence numbers
         std::atomic<uint8_t> nextSeqNum;
 
-        // Expected incoming packet sequence number
-        uint8_t expectedSeqNum;
+        // Expected incoming packet sequence numbers by remotes
+        std::unordered_map<Remote, RemoteOrder, RemoteHasher> remoteOrders;
         // Missing-packet timeout (milliseconds). If the next expected sequence
         // does not arrive within this window, the core will advance to the
         // next available sequence to avoid blocking forever.
         uint32_t missingPacketTimeoutMs;
 
-        // Timestamp when we started waiting for the next expected sequence.
-        std::chrono::steady_clock::time_point missingSince;
-        bool missingTimerActive;
-        // When true the core enforces ordering and timeouts; when false packets
-        // are dispatched immediately as they are parsed.
-        bool reliabilityEnabled;
+        uint64_t lastDataTimeMs = 0;
 
-        // Current incoming packet temporary fields (used by characterizePacket)
-        uint8_t currSeqNum = 0;
-        uint8_t currHeader = 0;
-        std::size_t currPayloadLen = 0;
+        // Handlers by remotes
+        std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;
+
+        std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
+        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderPackets();
+        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderRemote(const Remote remote, RemoteOrder& remoteOrder);
+        //TimerHandle_t startMissingTimer(RemoteOrder& remoteOrder);
+
+        ////////////////////////////////////////
+        // Specific to stream mode
 
         // New packet flag (looks for new packet in read buffer)
         bool newPacket = true;
 
-        // Characterizes incoming packet (inspects readBuffer and returns true if a full packet is available)
-        bool characterizePacket();
+        // Allows out of order packets
+        bool allowOutofOrder = true;
+
+        // Returns the next packet in readBuffer if there is one
+        std::shared_ptr<Packet> packetFromStream();
+
+        // Buffer management
+        void appendToReadBuffer(const uint8_t* data, std::size_t length);
+        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
+
+        ////////////////////////////////////////
+        // Both modes
 
         // Triggers handlers based on packet
         void callHandlers(std::shared_ptr<Packet> pkt);
 
-        mutable std::mutex dataMutex;
-        mutable std::mutex waitMutex;
+        std::mutex dataMutex;
+        std::mutex waitMutex;
+        std::condition_variable waitCv;
 
         //Read handler (global)
         ReadHandler readHandler;
 
         // Response handlers keyed by header
-        std::unordered_map<uint8_t, ReadHandler> specificHandlers;
-        std::condition_variable_any waitCv;
-        // last response packet received per header (for waitForResponse)
-        std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> lastHeaderMap;
+        std::unordered_map<uint8_t, ReadHandler> headerHandlers;
+        // last packet received per header (for waitForHeader)
+        std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> headerMap;
+        // last packet received per remote (for waitForRemote)
+        std::unordered_map<Remote, std::shared_ptr<SongbirdCore::Packet>, RemoteHasher> remoteMap;
+
+        // Timer thread and synchronization for desktop missing-packet timeout handling
+        std::thread missingTimerThread;
+        std::mutex missingTimerMutex;
+        std::condition_variable missingTimerCv;
+        std::atomic<bool> missingTimerThreadStop{false};
 };
 
 template <typename T>
@@ -177,4 +281,4 @@ T SongbirdCore::Packet::readData() {
     return data;
 }
 
-#endif // RUDP_CORE_H
+#endif // SONGBIRD_CORE_H

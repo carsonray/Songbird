@@ -15,14 +15,13 @@
 #include <boost/asio.hpp>
 
 #include "SongbirdCore.h"
-#include "SongbirdUARTNode.h"
-#include "UARTStream.h"
+#include "SongbirdUART.h"
 
 #define SERIAL_PORT "\\\\.\\COM5"
 #define SERIAL_BAUD_RATE 115200
 
 //Serial node object
-SongbirdUARTNode uartNode("UART Node");
+SongbirdUART uartNode("UART Node");
 //Serial server protocol object
 std::shared_ptr<SongbirdCore> core;
 
@@ -70,7 +69,7 @@ static bool run_specific_handler() {
     pkt.writeByte(0x42);
     core->sendPacket(pkt);
 
-    core->setSpecificHandler(0x10, [&](std::shared_ptr<SongbirdCore::Packet> pkt) {
+    core->setHeaderHandler(0x10, [&](std::shared_ptr<SongbirdCore::Packet> pkt) {
         if (!pkt) return;
         if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
             ok = true;

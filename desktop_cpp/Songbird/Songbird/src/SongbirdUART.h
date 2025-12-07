@@ -1,38 +1,44 @@
-#ifndef SONGBIRD_UART_NODE_H
-#define SONGBIRD_UART_NODE_H
+#ifndef SONGBIRD_UART_H
+#define SONGBIRD_UART_H
 
 #include <memory>
 #include <string>
 #include <thread>
 #include <atomic>
 #include <boost/asio.hpp>
-#include "UARTStream.h"
+#include "IStream.h"
 #include "SongbirdCore.h"
 
-class SongbirdUARTNode {
+class SongbirdUART : public IStream {
 public:
-    SongbirdUARTNode(std::string name);
-    ~SongbirdUARTNode();
+    SongbirdUART(std::string name);
+    ~SongbirdUART();
 
     // Initialize and open the serial port
     bool begin(const std::string& port, unsigned int baudRate);
 
+	// Write data to the serial port
+    void write(const uint8_t* buffer, std::size_t length) override;
+
     // Close the serial port
-    void end();
+    void close() override;
 
     // Get the MinBiTCore protocol object
     std::shared_ptr<SongbirdCore> getProtocol();
 
     // Check if the serial port is open
-    bool isOpen() const;
+    bool isOpen() const override;
+
+    void startAsyncReadLoop();
 
 private:
     boost::asio::io_context ioContext;
-    std::shared_ptr<UARTStream> serialStream;
+    // Serial port object (heap allocated to construct with io_context)
+    std::unique_ptr<boost::asio::serial_port> serialPort;
     std::shared_ptr<SongbirdCore> protocol;
     std::thread ioThread;
 
     std::atomic<bool> asyncActive{false};
 };
 
-#endif // RUDP_SERIAL_NODE_H
+#endif // SONGBIRD_UART_H

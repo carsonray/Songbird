@@ -345,7 +345,14 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
         // Process complete or incomplete packets in readBuffer
         while (true) {
             std::shared_ptr<Packet> pkt = packetFromStream();
-            if (!pkt) break;
+            if (!pkt) {
+                if (millis() - lastDataTimeMs > missingPacketTimeoutMs) {
+                    // Timeout: clear read buffer to avoid stale data
+                    flush();
+                }
+                break;
+            }
+            lastDataTimeMs = millis();
             pkt->setRemote(remoteIP, remotePort);
             callHandlers(pkt);
         }
