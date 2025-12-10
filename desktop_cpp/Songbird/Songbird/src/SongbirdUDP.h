@@ -14,7 +14,6 @@ public:
     SongbirdUDP(std::string name);
     ~SongbirdUDP();
 
-    void begin();
     bool listen(unsigned short listenPort);
     void listenMulticast(const boost::asio::ip::address &addr, uint16_t port);
     bool setRemote(const boost::asio::ip::address &addr, uint16_t port);
@@ -61,6 +60,9 @@ private:
     // keep io_context alive while thread is running
     using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
     std::unique_ptr<WorkGuard> ioWorkGuard;
+
+    // whether the io thread / work guard has been started
+    bool begun{false};
 
     static const std::size_t ASYNC_READ_BUF = 2048;
 };

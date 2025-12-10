@@ -56,14 +56,15 @@ void SongbirdUDP::startAsyncReadLoop() {
     });
 }
 
-void SongbirdUDP::begin() {
-    // create work guard to keep io_context.run() alive
-    ioWorkGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(ioContext));
-    ioThread = std::thread([this]() { ioContext.run(); });
-}
-
 bool SongbirdUDP::listen(unsigned short listenPort) {
     try {
+        // Start io thread & work guard if not begun
+        if (!begun) {
+            ioWorkGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(ioContext));
+            ioThread = std::thread([this]() { ioContext.run(); });
+            begun = true;
+        }
+
 		// Close socket if already open
         closeSocket();
         socket->open(boost::asio::ip::udp::v4());

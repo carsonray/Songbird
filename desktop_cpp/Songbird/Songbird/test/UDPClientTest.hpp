@@ -135,7 +135,6 @@ int main() {
     // Gets data protocol
     core = udp.getProtocol();
 
-    udp.begin();
     // Begins connection
     if (!udp.listen(UDP_LOCAL_PORT)) {
         return 1;

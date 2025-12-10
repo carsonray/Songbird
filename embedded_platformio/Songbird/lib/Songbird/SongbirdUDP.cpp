@@ -6,28 +6,26 @@ SongbirdUDP::SongbirdUDP(std::string name)
 {
     protocol->attachStream(this);
     protocol->setMissingPacketTimeout(10);
-}
-
-SongbirdUDP::~SongbirdUDP() {
-    close();
-}
-
-void SongbirdUDP::begin() {
     udp.onPacket([this](AsyncUDPPacket packet) {
         // Logs packet origin and length
         //Serial.println("Received packet from " + packet.remoteIP().toString() + ":" + String(packet.remotePort()) + " - Length: " + String(packet.length()));
         // Parse received data with protocol
         protocol->parseData(packet.data(), packet.length(), packet.remoteIP(), packet.remotePort());
     });
-    opened = true;
+}
+
+SongbirdUDP::~SongbirdUDP() {
+    close();
 }
 
 bool SongbirdUDP::listen(uint16_t port) {
     multicastMode = false;
+    opened = true;
     return udp.listen(port);
 }
 void SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
     multicastMode = true;
+    opened = true;
     udp.listenMulticast(addr, port);
 }
 
