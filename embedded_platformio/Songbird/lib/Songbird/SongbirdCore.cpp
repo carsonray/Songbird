@@ -277,9 +277,20 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum) {
     // Attaches sequence number if in packet mode
     if (processMode == PACKET) {
         packet.setSequenceNum(sequenceNum);
+
+        // If a stream is attached and open, send this packet immediately as a single write.
+        // This preserves UDP datagram boundaries so the receiver won't see multiple logical
+        // packets concatenated in one datagram.
+        if (stream && stream->isOpen()) {
+            std::vector<uint8_t> bytes = packet.toBytes(processMode);
+            stream->write(bytes.data(), bytes.size());
+            return;
+        }
     }
-    holdPacket(packet);
-    sendAll();
+    else {
+        holdPacket(packet);
+        sendAll();
+    }
 }
 
 void SongbirdCore::sendAll() {

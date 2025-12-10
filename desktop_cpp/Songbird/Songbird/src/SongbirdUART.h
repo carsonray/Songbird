@@ -39,6 +39,10 @@ private:
     std::thread ioThread;
 
     std::atomic<bool> asyncActive{false};
+
+    // keep io_context alive while thread is running
+    using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
+    std::unique_ptr<WorkGuard> ioWorkGuard;
 };
 
 #endif // SONGBIRD_UART_H

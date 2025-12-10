@@ -27,9 +27,11 @@ void SongbirdUDP::closeSocket() {
     }
 }
 void SongbirdUDP::close() {
-    closeSocket();
+    // release work guard so run() can exit cleanly, then stop context and join thread
+    ioWorkGuard.reset();
     ioContext.stop();
     if (ioThread.joinable()) ioThread.join();
+    closeSocket();
 }
 
 void SongbirdUDP::startAsyncReadLoop() {
@@ -37,13 +39,15 @@ void SongbirdUDP::startAsyncReadLoop() {
 
     auto buf = std::make_shared<std::vector<uint8_t>>(ASYNC_READ_BUF);
     auto proto = protocol;
-
     socket->async_receive_from(boost::asio::buffer(*buf), lastRemoteEndpoint, [this, proto, buf](const boost::system::error_code& ec, std::size_t bytesTransferred) {
         if (!asyncActive.load()) return;
         if (!ec && bytesTransferred > 0) {
+            std::cout << "UDP Packet received from " << lastRemoteEndpoint.address().to_string() << ":" << lastRemoteEndpoint.port() << " (" << bytesTransferred << " bytes)" << std::endl;
             // get last remote endpoint via member
             boost::asio::ip::udp::endpoint ep = this->lastRemoteEndpoint;
             proto->parseData(buf->data(), bytesTransferred, ep.address(), ep.port());
+        } else if (ec) {
+            std::cerr << "UDP receive error: " << ec.message() << std::endl;
         }
 
         if (asyncActive.load()) {
@@ -53,6 +57,8 @@ void SongbirdUDP::startAsyncReadLoop() {
 }
 
 bool SongbirdUDP::begin(unsigned short listenPort) {
+    // create work guard to keep io_context.run() alive
+    ioWorkGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(ioContext));
     ioThread = std::thread([this]() { ioContext.run(); });
     return listen(listenPort);
 }

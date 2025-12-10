@@ -26,6 +26,9 @@ bool SongbirdUART::begin(const std::string& port, unsigned int baudRate) {
         serialPort->set_option(boost::asio::serial_port_base::stop_bits(boost::asio::serial_port_base::stop_bits::one));
         serialPort->set_option(boost::asio::serial_port_base::flow_control(boost::asio::serial_port_base::flow_control::none));
 
+        // create work guard to keep io_context.run() alive
+        ioWorkGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(ioContext));
+
         // Start io thread
         ioThread = std::thread([this]() { ioContext.run(); });
 
@@ -58,6 +61,8 @@ void SongbirdUART::close() {
         serialPort->close(ec);
     }
 
+    // release work guard so run() can exit cleanly, then stop context and join thread
+    ioWorkGuard.reset();
     ioContext.stop();
     if (ioThread.joinable()) {
         ioThread.join();

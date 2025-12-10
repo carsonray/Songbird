@@ -58,6 +58,10 @@ private:
     uint16_t remotePort{0};
     uint16_t localPort{0};
 
+    // keep io_context alive while thread is running
+    using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
+    std::unique_ptr<WorkGuard> ioWorkGuard;
+
     static const std::size_t ASYNC_READ_BUF = 2048;
 };
 
