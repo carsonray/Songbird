@@ -22,7 +22,7 @@ public:
     void listenMulticast(const IPAddress &addr, uint16_t port);
 
     // Sets remote address and port
-    bool setRemote(const IPAddress &addr, uint16_t port, bool bind);
+    bool setRemote(const IPAddress &addr, uint16_t port);
     // Sets broadcast mode
     void setBroadcastMode(bool broadcastMode);
 
@@ -46,7 +46,6 @@ private:
     bool opened;
     bool broadcastMode;
     bool multicastMode;
-    bool bindMode;
     IPAddress remoteIP;
     uint16_t remotePort;
     uint16_t localPort;
