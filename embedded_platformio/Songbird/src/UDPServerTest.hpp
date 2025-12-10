@@ -11,7 +11,7 @@ const char *password = "*****";
 const uint16_t listenPort = 8080;
 
 //Remote endpoint configuration
-const char *remoteIP = "143.215.191.136";
+const char *remoteIP = "192.168.0.187";
 const uint16_t remotePort = 8080;
 
 // RTOS Task Handles
@@ -53,9 +53,15 @@ void setup() {
   Serial.println(listenPort);
 
   // Configures remote endpoint
-  //udp.setRemote(IPAddress().fromString(remoteIP), remotePort);
+  IPAddress remoteAddr;
+  bool remoteParsed = remoteAddr.fromString(remoteIP);
+  if (!remoteParsed) {
+    Serial.print("Failed to parse remote IP string: ");
+    Serial.println(remoteIP);
+  }
+  udp.setRemote(remoteParsed ? remoteAddr : IPAddress(0, 0, 0, 0), remotePort, false);
   Serial.print("Remote IP: ");
-  Serial.println(remoteIP);
+  Serial.println(remoteParsed ? remoteAddr : IPAddress(0, 0, 0, 0));
   Serial.print("Remote Port: ");
   Serial.println(remotePort);
 

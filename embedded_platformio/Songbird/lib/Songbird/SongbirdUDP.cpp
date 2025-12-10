@@ -2,7 +2,7 @@
 #include <cstring>
 
 SongbirdUDP::SongbirdUDP(std::string name)
-    : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM)), opened(false), broadcastMode(false), localPort(0)
+    : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::PACKET)), opened(false), broadcastMode(false), multicastMode(false), bindMode(false), localPort(0)
 {
     protocol->attachStream(this);
     protocol->setMissingPacketTimeout(10);
@@ -23,19 +23,31 @@ bool SongbirdUDP::begin() {
 
 bool SongbirdUDP::listen(uint16_t port) {
     multicastMode = false;
+    bindMode = false;
     return udp.listen(port);
 }
 void SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
     multicastMode = true;
+    bindMode = false;
     udp.listenMulticast(addr, port);
 }
 
-bool SongbirdUDP::setRemote(const IPAddress &addr, uint16_t port) {
+bool SongbirdUDP::setRemote(const IPAddress &addr, uint16_t port, bool bind) {
+    // Validate remote address to avoid accidentally setting 0.0.0.0/1.0.0.0
+    if (addr == IPAddress(0, 0, 0, 0)) {
+        Serial.println("SongbirdUDP::setRemote: invalid remote IP (0.0.0.0), refusing to set");
+        return false;
+    }
+
     // Attempts to connect to remote
     remoteIP = addr;
     remotePort = port;
     broadcastMode = false;
-    return udp.connect(addr, port);
+    bindMode = bind;
+    if (bind) {
+        return udp.connect(addr, port);
+    }
+    return true;
 }
 
 void SongbirdUDP::setBroadcastMode(bool mode) {
@@ -67,7 +79,11 @@ bool SongbirdUDP::isMulticast() {
 void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
     if (!opened) return;
     if (!broadcastMode) {
-        udp.write(buffer, length);
+        if (bindMode) {
+            udp.write(buffer, length);
+        } else {
+            udp.writeTo(buffer, length, remoteIP, remotePort, TCPIP_ADAPTER_IF_STA);
+        }
     } else {
         udp.broadcast(const_cast<uint8_t*>(buffer), length);
     }

@@ -17,7 +17,7 @@
 #include "../src/SongbirdCore.h"
 #include "../src/SongbirdUDP.h"
 
-#define UDP_REMOTE_ADDR "143.215.191.125"
+#define UDP_REMOTE_ADDR "192.168.0.114"
 #define UDP_REMOTE_PORT 8080
 
 #define UDP_LOCAL_PORT 8080
