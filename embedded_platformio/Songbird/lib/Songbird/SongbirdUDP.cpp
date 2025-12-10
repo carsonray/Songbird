@@ -12,13 +12,14 @@ SongbirdUDP::~SongbirdUDP() {
     close();
 }
 
-bool SongbirdUDP::begin() {
+void SongbirdUDP::begin() {
     udp.onPacket([this](AsyncUDPPacket packet) {
+        // Logs packet origin and length
+        //Serial.println("Received packet from " + packet.remoteIP().toString() + ":" + String(packet.remotePort()) + " - Length: " + String(packet.length()));
         // Parse received data with protocol
         protocol->parseData(packet.data(), packet.length(), packet.remoteIP(), packet.remotePort());
     });
     opened = true;
-    return true;
 }
 
 bool SongbirdUDP::listen(uint16_t port) {

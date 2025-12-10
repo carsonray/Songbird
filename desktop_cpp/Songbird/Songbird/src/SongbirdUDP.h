@@ -14,7 +14,7 @@ public:
     SongbirdUDP(std::string name);
     ~SongbirdUDP();
 
-    bool begin(unsigned short listenPort);
+    void begin();
     bool listen(unsigned short listenPort);
     void listenMulticast(const boost::asio::ip::address &addr, uint16_t port);
     bool setRemote(const boost::asio::ip::address &addr, uint16_t port);

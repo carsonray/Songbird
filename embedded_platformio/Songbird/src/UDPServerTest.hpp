@@ -47,8 +47,8 @@ void setup() {
   }
 
   // Begins listening on port
-  udp.listen(listenPort);
   udp.begin();
+  udp.listen(listenPort);
   Serial.print("Listening on UDP port: ");
   Serial.println(listenPort);
 

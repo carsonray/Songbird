@@ -14,7 +14,7 @@ public:
     ~SongbirdUDP() override;
 
     // Start listen handler
-    bool begin();
+    void begin();
 
     // Sets local port to listen at
     bool listen(uint16_t port);

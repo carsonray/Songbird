@@ -42,7 +42,7 @@ void SongbirdUDP::startAsyncReadLoop() {
     socket->async_receive_from(boost::asio::buffer(*buf), lastRemoteEndpoint, [this, proto, buf](const boost::system::error_code& ec, std::size_t bytesTransferred) {
         if (!asyncActive.load()) return;
         if (!ec && bytesTransferred > 0) {
-            std::cout << "UDP Packet received from " << lastRemoteEndpoint.address().to_string() << ":" << lastRemoteEndpoint.port() << " (" << bytesTransferred << " bytes)" << std::endl;
+            //std::cout << "UDP Packet received from " << lastRemoteEndpoint.address().to_string() << ":" << lastRemoteEndpoint.port() << " (" << bytesTransferred << " bytes)" << std::endl;
             // get last remote endpoint via member
             boost::asio::ip::udp::endpoint ep = this->lastRemoteEndpoint;
             proto->parseData(buf->data(), bytesTransferred, ep.address(), ep.port());
@@ -56,21 +56,23 @@ void SongbirdUDP::startAsyncReadLoop() {
     });
 }
 
-bool SongbirdUDP::begin(unsigned short listenPort) {
+void SongbirdUDP::begin() {
     // create work guard to keep io_context.run() alive
     ioWorkGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(ioContext));
     ioThread = std::thread([this]() { ioContext.run(); });
-    return listen(listenPort);
 }
 
 bool SongbirdUDP::listen(unsigned short listenPort) {
     try {
 		// Close socket if already open
         closeSocket();
-        boost::asio::ip::udp::endpoint listenEndpoint(boost::asio::ip::udp::v4(), listenPort);
         socket->open(boost::asio::ip::udp::v4());
-        socket->bind(listenEndpoint);
-        localPort = listenPort;
+        if (listenPort != 0) {
+            boost::asio::ip::udp::endpoint listenEndpoint(boost::asio::ip::udp::v4(), listenPort);
+            socket->bind(listenEndpoint);
+        }
+        
+        localPort = socket->local_endpoint().port();
 
         asyncActive.store(true);
         startAsyncReadLoop();
