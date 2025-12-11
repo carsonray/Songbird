@@ -30,6 +30,9 @@
     <ClInclude Include="test\UARTMasterTest.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="test\UDPMulticastServerTest.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -46,6 +49,9 @@
     </ClCompile>
     <ClCompile Include="test\UDPClientTest.hpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="test\UDPMulticastTest.hpp">
+      <Filter>Header Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

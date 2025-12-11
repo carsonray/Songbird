@@ -25,7 +25,6 @@ std::shared_ptr<SongbirdCore> core;
 
 // RTOS task function prototypes
 void testsTask(void* pvParameters);
-void updateTask(void* pvParameters);
 
 void setup() {
   core = udp.getProtocol();

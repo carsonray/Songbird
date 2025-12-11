@@ -1,9 +1,11 @@
-#define BUILD_UDP_TEST
+#define BUILD_UDP_MULTICAST_SERVER_TEST
 
 #if defined(BUILD_UART_TEST)
 #include "../test/UARTMasterTest.hpp"
-#elif defined(BUILD_UDP_TEST)
+#elif defined(BUILD_UDP_CLIENT_TEST)
 #include "../test/UDPClientTest.hpp"
+#elif defined(BUILD_UDP_MULTICAST_SERVER_TEST)
+#include "../test/UDPMulticastServerTest.hpp"
 #else
-#error "No test selected (define BUILD_UART_TEST or BUILD_UDP_TEST)"
+#error "No test selected"
 #endif

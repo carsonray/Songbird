@@ -1,2 +1,2 @@
-// Test switcher
-#include "UDPServerTest.hpp"
+// Test switch
+#include "UDPMulticastClientTest.hpp"

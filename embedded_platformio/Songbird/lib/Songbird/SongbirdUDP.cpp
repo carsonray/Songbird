@@ -7,8 +7,6 @@ SongbirdUDP::SongbirdUDP(std::string name)
     protocol->attachStream(this);
     protocol->setMissingPacketTimeout(10);
     udp.onPacket([this](AsyncUDPPacket packet) {
-        // Logs packet origin and length
-        //Serial.println("Received packet from " + packet.remoteIP().toString() + ":" + String(packet.remotePort()) + " - Length: " + String(packet.length()));
         // Parse received data with protocol
         protocol->parseData(packet.data(), packet.length(), packet.remoteIP(), packet.remotePort());
     });
@@ -23,25 +21,23 @@ bool SongbirdUDP::listen(uint16_t port) {
     opened = true;
     return udp.listen(port);
 }
-void SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
+bool SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
     multicastMode = true;
     opened = true;
-    udp.listenMulticast(addr, port);
+    bool result = udp.listenMulticast(addr, port);
+    return result;
 }
 
-bool SongbirdUDP::setRemote(const IPAddress &addr, uint16_t port) {
-    // Validate remote address to avoid accidentally setting 0.0.0.0/1.0.0.0
-    if (addr == IPAddress(0, 0, 0, 0)) {
-        Serial.println("SongbirdUDP::setRemote: invalid remote IP (0.0.0.0), refusing to set");
-        return false;
-    }
-
+bool SongbirdUDP::setRemote(const IPAddress &addr, uint16_t port, bool bind) {
     // Attempts to connect to remote
     remoteIP = addr;
     remotePort = port;
     broadcastMode = false;
-    
-    return udp.connect(addr, port);
+    bindMode = bind;
+    if (bind) {
+        return udp.connect(addr, port);
+    }
+    return true;
 }
 
 void SongbirdUDP::setBroadcastMode(bool mode) {
@@ -70,10 +66,18 @@ bool SongbirdUDP::isMulticast() {
     return multicastMode;
 }
 
+bool SongbirdUDP::isBound() {
+    return bindMode;
+}
+
 void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
     if (!opened) return;
     if (!broadcastMode) {
-        udp.write(buffer, length);
+        if (bindMode) {
+            udp.write(buffer, length);
+        } else {
+            udp.writeTo(buffer, length, remoteIP, remotePort, TCPIP_ADAPTER_IF_STA);
+        }
     } else {
         udp.broadcast(const_cast<uint8_t*>(buffer), length);
     }

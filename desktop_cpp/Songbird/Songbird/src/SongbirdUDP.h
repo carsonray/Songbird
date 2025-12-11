@@ -15,8 +15,10 @@ public:
     ~SongbirdUDP();
 
     bool listen(unsigned short listenPort);
-    void listenMulticast(const boost::asio::ip::address &addr, uint16_t port);
-    bool setRemote(const boost::asio::ip::address &addr, uint16_t port);
+	
+    bool listenMulticast(const boost::asio::ip::address &addr, uint16_t port);
+    // setRemote now accepts a bind flag; if true the socket will be connected to the remote endpoint
+    void setRemote(const boost::asio::ip::address &addr, uint16_t port, bool bind = false);
     void setBroadcastMode(bool mode);
     boost::asio::ip::address getRemoteIP();
     uint16_t getRemotePort();
@@ -24,6 +26,8 @@ public:
     std::shared_ptr<SongbirdCore> getProtocol();
     bool isBroadcast();
     bool isMulticast();
+    // Returns true if the socket has been connected to a remote (bind mode)
+    bool isBound() const;
 
     // IStream overrides
     std::shared_ptr<boost::asio::ip::udp::socket> getSocket();
@@ -38,9 +42,6 @@ public:
 
     // Start internal async read loop
     void startAsyncReadLoop();
-
-    // Access last remote endpoint
-    boost::asio::ip::udp::endpoint getLastRemoteEndpoint() const;
 
 private:
     boost::asio::io_context ioContext;
@@ -57,6 +58,9 @@ private:
     uint16_t remotePort{0};
     uint16_t localPort{0};
 
+    // If true, socket is connected to remote and write should use send (no endpoint)
+    bool bindMode{false};
+
     // keep io_context alive while thread is running
     using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
     std::unique_ptr<WorkGuard> ioWorkGuard;
@@ -64,6 +68,10 @@ private:
     // whether the io thread / work guard has been started
     bool begun{false};
 
+    // helper to start IO thread, close existing socket and open a new IPv4 socket
+    // if reuseAddress is true, sets SO_REUSEADDR before binding
+    bool prepareSocket(bool reuseAddress = false);
+    
     static const std::size_t ASYNC_READ_BUF = 2048;
 };
 

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -127,13 +127,14 @@
     <ClInclude Include="src\SongbirdCore.h" />
     <ClInclude Include="src\SongbirdUART.h" />
     <ClInclude Include="src\SongbirdUDP.h" />
-    <ClInclude Include="test\UARTMasterTest.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\SongbirdCore.cpp" />
     <ClCompile Include="src\SongbirdUART.cpp" />
     <ClCompile Include="src\SongbirdUDP.cpp" />
+	<ClInclude Include="test\UARTMasterTest.hpp" />
+    <ClCompile Include="test\UDPMulticastServerTest.hpp" />
     <ClCompile Include="test\UDPClientTest.hpp" />
   </ItemGroup>
   <ItemGroup>

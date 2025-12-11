@@ -19,15 +19,16 @@ public:
     // Sets local port to listen at
     bool listen(uint16_t port);
     // Subscribes to multicast
-    void listenMulticast(const IPAddress &addr, uint16_t port);
+    bool listenMulticast(const IPAddress &addr, uint16_t port);
 
     // Sets remote address and port
-    bool setRemote(const IPAddress &addr, uint16_t port);
+    bool setRemote(const IPAddress &addr, uint16_t port, bool bind = false);
     // Sets broadcast mode
     void setBroadcastMode(bool broadcastMode);
 
     bool isBroadcast();
     bool isMulticast();
+    bool isBound();
 
     IPAddress getRemoteIP();
     uint16_t getRemotePort();
@@ -46,6 +47,7 @@ private:
     bool opened;
     bool broadcastMode;
     bool multicastMode;
+    bool bindMode;
     IPAddress remoteIP;
     uint16_t remotePort;
     uint16_t localPort;

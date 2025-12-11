@@ -2,7 +2,7 @@
 // Mirrors UARTMasterTest but uses SongbirdUDP instead of SongbirdUART.
 // Usage: UDPClientTest (the test will send to localhost:12345 by default)
 
-#ifdef BUILD_UDP_TEST
+#ifdef BUILD_UDP_CLIENT_TEST
 
 #include <iostream>
 #include <memory>
@@ -52,7 +52,7 @@ static bool run_basic_send_receive() {
         if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
             ok = true;
         }
-    });
+        });
 
     auto start = std::chrono::steady_clock::now();
     while (!ok && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < 2000) {
@@ -73,7 +73,7 @@ static bool run_specific_handler() {
         if (pkt->getHeader() == 0x10 && pkt->getPayloadLength() == 1 && pkt->readByte() == 0x42) {
             ok = true;
         }
-    });
+        });
 
     auto start = std::chrono::steady_clock::now();
     while (!ok && std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < 2000) {
@@ -179,3 +179,4 @@ int main() {
 }
 
 #endif // BUILD_UDP_TEST
+
