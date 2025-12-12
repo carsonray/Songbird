@@ -54,7 +54,7 @@ int main() {
         // Sends LED toggle message
         auto pkt = core->createPacket(0x03);
         pkt.writeByte(ledState); // LED toggle
-        core->sendPacket(pkt);
+        core->sendPacket(pkt, true);
 		std::cout << "Sent LED toggle: " << (ledState ? "ON" : "OFF") << "\n";
         ledState = !ledState;
         std::this_thread::sleep_for(std::chrono::seconds(1));

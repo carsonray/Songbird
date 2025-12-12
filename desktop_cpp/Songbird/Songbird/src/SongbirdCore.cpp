@@ -8,24 +8,48 @@ using namespace std::chrono_literals;
 
 /// Packet implementation
 SongbirdCore::Packet::Packet(uint8_t header)
-    : header(header), sequenceNum(0), payloadLength(0), payload(), readPos(0) {
+    : header(header), sequenceNum(0), guaranteedFlag(false), payloadLength(0), payload(), readPos(0) {
 }
 
 SongbirdCore::Packet::Packet(uint8_t header, const std::vector<uint8_t>& payload)
-    : header(header), sequenceNum(0), payloadLength(payload.size()), payload(payload), readPos(0) {
+    : header(header), sequenceNum(0), guaranteedFlag(false), payloadLength(payload.size()), payload(payload), readPos(0) {
 }
 
-std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mode) const {
+std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode) const {
     std::vector<uint8_t> out;
-    out.reserve(2 + payloadLength);
-    out.push_back(header);
-    if (mode == SongbirdCore::STREAM) {
-        // Length is needed for stream framing
-        out.push_back(static_cast<uint8_t>(payloadLength));
+
+    if (reliableMode == SongbirdCore::RELIABLE) {
+        // RELIABLE mode: no seq/guaranteed bytes
+        // STREAM: [header][length][payload]
+        // PACKET: [header][payload]
+        size_t headerSize = (mode == SongbirdCore::STREAM) ? 2 : 1;
+        out.reserve(headerSize + payloadLength);
+        out.push_back(header);
+        if (mode == SongbirdCore::STREAM) {
+            // Length is needed for stream framing
+            out.push_back(static_cast<uint8_t>(payloadLength));
+        }
     }
-    else if (mode == SongbirdCore::PACKET) {
-        // In packet mode, length is implicit but sequence number is needed to preserve ordering
-        out.push_back(sequenceNum);
+    else {
+        // UNRELIABLE mode: includes seq/guaranteed bytes
+        // STREAM: [header][length][seq][guaranteed][payload] = 4 + payload
+        // PACKET: [header][seq][guaranteed][payload] = 3 + payload
+        size_t headerSize = (mode == SongbirdCore::STREAM) ? 4 : 3;
+        out.reserve(headerSize + payloadLength);
+        out.push_back(header);
+        if (mode == SongbirdCore::STREAM) {
+            // Length is needed for stream framing
+            out.push_back(static_cast<uint8_t>(payloadLength));
+            // Add sequence number for guaranteed delivery
+            out.push_back(sequenceNum);
+        }
+        else if (mode == SongbirdCore::PACKET) {
+            // In packet mode, length is implicit but sequence number is needed to preserve ordering
+            out.push_back(sequenceNum);
+        }
+
+        // Add guaranteed flag byte (0 or 1)
+        out.push_back(guaranteedFlag ? 1 : 0);
     }
 
     if (!payload.empty()) {
@@ -38,12 +62,20 @@ void SongbirdCore::Packet::setSequenceNum(uint8_t seqNum) {
     sequenceNum = seqNum;
 }
 
+void SongbirdCore::Packet::setGuaranteed(bool guaranteed) {
+    guaranteedFlag = guaranteed;
+}
+
+bool SongbirdCore::Packet::isGuaranteed() const {
+    return guaranteedFlag;
+}
+
 uint8_t SongbirdCore::Packet::getHeader() const {
     return header;
 }
 
 uint8_t SongbirdCore::Packet::getSequenceNum() const {
-    return static_cast<int64_t>(sequenceNum);
+    return static_cast<uint8_t>(sequenceNum);
 }
 
 std::vector<uint8_t> SongbirdCore::Packet::getPayload() const {
@@ -61,6 +93,11 @@ std::size_t SongbirdCore::Packet::getRemainingBytes() const {
 void SongbirdCore::Packet::setRemote(const boost::asio::ip::address& ip, uint16_t port) {
     remoteIP = ip;
     remotePort = port;
+}
+
+void SongbirdCore::Packet::setRemote(const Remote& remote) {
+    remoteIP = remote.ip;
+    remotePort = remote.port;
 }
 
 SongbirdCore::Remote SongbirdCore::Packet::getRemote() const {
@@ -151,24 +188,29 @@ int16_t SongbirdCore::Packet::readInt16() {
 
 /// SongbirdCore implementation
 
-SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode)
-    : self(this), name(std::move(name)), processMode(mode), nextSeqNum(0), missingPacketTimeoutMs(100)
+SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode)
+    : self(this), name(std::move(name)), processMode(mode), reliableMode(reliableMode), nextSeqNum(0), missingPacketTimeoutMs(100), retransmissionTimeoutMs(1000), maxRetransmitAttempts(5)
 {
-    // Start missing-packet monitor thread for desktop
+    // Start missing-packet monitor thread for desktop (also handles retransmission)
     missingTimerThreadStop.store(false);
     missingTimerThread = std::thread([this]() {
         using namespace std::chrono;
         while (!missingTimerThreadStop.load()) {
             // Sleep for a short interval, or until signalled
             std::unique_lock<std::mutex> lk(missingTimerMutex);
-            missingTimerCv.wait_for(lk, std::chrono::milliseconds(missingPacketTimeoutMs), [this]() { return missingTimerThreadStop.load(); });
+            missingTimerCv.wait_for(lk, std::chrono::milliseconds(std::min(missingPacketTimeoutMs, retransmissionTimeoutMs)), 
+                [this]() { return missingTimerThreadStop.load(); });
             if (missingTimerThreadStop.load()) break;
 
             // Collect remotes whose missing timer expired
             std::vector<Remote> expiredRemotes;
+            // Collect packets that need retransmission
+            std::vector<uint8_t> retransmitPackets;
+            
             auto now = steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(dataMutex);
+                // Check missing packet timeouts
                 for (auto& it : remoteOrders) {
                     const Remote& r = it.first;
                     RemoteOrder& order = it.second;
@@ -179,11 +221,26 @@ SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode)
                         }
                     }
                 }
+
+                // Check guaranteed delivery retransmission timeouts
+                for (auto& it : outgoingGuaranteed) {
+                    uint8_t seqNum = it.first;
+                    OutgoingInfo& gp = it.second;
+                    auto elapsed = duration_cast<milliseconds>(now - gp.sendTime).count();
+                    if (static_cast<uint32_t>(elapsed) >= retransmissionTimeoutMs) {
+                        retransmitPackets.push_back(seqNum);
+                    }
+                }
             }
 
             // Call onMissingTimeout for each expired remote outside the data lock
             for (const auto& r : expiredRemotes) {
                 onMissingTimeout(r);
+            }
+
+            // Retransmit guaranteed packets
+            for (auto& seqNum : retransmitPackets) {
+				onRetransmissionTimeout(seqNum);
             }
         }
     });
@@ -194,8 +251,6 @@ SongbirdCore::~SongbirdCore() {
     missingTimerThreadStop.store(true);
     missingTimerCv.notify_all();
     if (missingTimerThread.joinable()) missingTimerThread.join();
-
-    flush();
 }
 
 void SongbirdCore::attachStream(IStream* stream) {
@@ -208,6 +263,11 @@ void SongbirdCore::setReadHandler(ReadHandler handler) {
 }
 
 void SongbirdCore::setHeaderHandler(uint8_t header, ReadHandler handler) {
+    // Header 0x00 is reserved for ACKs
+    if (header == 0x00) {
+        std::cerr << "Header 0x00 is reserved for ACKs and cannot be used\n";
+        return;
+    }
     std::lock_guard<std::mutex> lock(dataMutex);
     headerHandlers[header] = std::move(handler);
 }
@@ -314,6 +374,11 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForRemote(boost::asio::i
 }
 
 SongbirdCore::Packet SongbirdCore::createPacket(uint8_t header) {
+    // Header 0x00 is reserved for ACKs
+    if (header == 0x00) {
+        std::cerr << "Header 0x00 is reserved for ACKs and cannot be used\n";
+        return Packet(0x01); // Return packet with header 0x01 instead
+    }
     return Packet(header);
 }
 
@@ -324,57 +389,73 @@ void SongbirdCore::setMissingPacketTimeout(uint32_t ms) {
     missingTimerCv.notify_all();
 }
 
+void SongbirdCore::setRetransmissionTimeout(uint32_t ms) {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    retransmissionTimeoutMs = ms;
+    // notify monitor thread in case it needs to re-evaluate
+    missingTimerCv.notify_all();
+}
+
+void SongbirdCore::setMaxRetransmitAttempts(uint32_t attempts) {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    maxRetransmitAttempts = attempts;
+}
+
 void SongbirdCore::setAllowOutofOrder(bool allow) {
     if (allowOutofOrder == allow) return;
     allowOutofOrder = allow;
-    if (allow) {
-        // Clears remote ordering map
-        remoteOrders.clear();
+}
+
+void SongbirdCore::sendPacket(Packet& packet, bool guaranteeDelivery) {
+    sendPacket(packet, nextSeqNum.fetch_add(1), guaranteeDelivery);
+}
+
+void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guaranteeDelivery) {
+    if (!stream || !stream->isOpen()) {
+		std::cerr << "Stream not attached or not open, cannot send packet\n";
+        return;
     }
-}
 
-void SongbirdCore::holdPacket(const Packet& packet) {
-    std::vector<uint8_t> bytes = packet.toBytes(processMode);
-    appendToWriteBuffer(bytes.data(), bytes.size());
-}
+    // Attach sequence number in both modes
+    packet.setSequenceNum(sequenceNum);
+    // Set guaranteed flag if needed
+    if (guaranteeDelivery) {
+        packet.setGuaranteed(true);
+    }
 
-void SongbirdCore::sendPacket(Packet& packet) {
-    sendPacket(packet, nextSeqNum.fetch_add(1));
-}
-void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum) {
-    // Attaches sequence number if in packet mode
-    if (processMode == PACKET) {
-        packet.setSequenceNum(sequenceNum);
-
-        // If a stream is attached and open, send this packet immediately as a single write.
-        // This preserves UDP datagram boundaries so the receiver won't see multiple logical
-        // packets concatenated in one datagram.
-        if (stream && stream->isOpen()) {
-            std::vector<uint8_t> bytes = packet.toBytes(processMode);
-            stream->write(bytes.data(), bytes.size());
-            return;
-        }
+    // Write directly to stream in both modes
+    std::vector<uint8_t> bytes = packet.toBytes(processMode, reliableMode);
+    Remote remote = packet.getRemote();
+    bool supportsRemote = stream->supportsRemoteWrite();
+    if (supportsRemote && remote.port != 0) {
+        stream->writeToRemote(bytes.data(), bytes.size(), remote.ip, remote.port);
     }
     else {
-        holdPacket(packet);
-        sendAll();
+        stream->write(bytes.data(), bytes.size());
     }
-}
 
-void SongbirdCore::sendAll() {
-    // attempt immediate send if stream available
-    if (stream && stream->isOpen()) {
-        std::vector<uint8_t> localBuf;
-        {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            if (!writeBuffer.empty()) {
-                localBuf = writeBuffer;
-                writeBuffer.clear();
+    // Track guaranteed packets and start retransmit timer in both modes
+    if (guaranteeDelivery && reliableMode == UNRELIABLE) {
+        Remote remote = packet.getRemote();
+        // If packet doesn't have a valid remote, use the stream's default remote
+        if (supportsRemote && remote.port == 0) {
+            boost::asio::ip::address defaultIP;
+            uint16_t defaultPort;
+            if (stream->getDefaultRemote(defaultIP, defaultPort)) {
+                remote.ip = defaultIP;
+                remote.port = defaultPort;
+                packet.setRemote(remote);
             }
         }
+		// Initialize outgoing info with current time
+		OutgoingInfo info;
+		info.sendTime = std::chrono::steady_clock::now();
+		info.packet = std::make_shared<Packet>(packet);
+		info.remote = remote;
 
-        if (!localBuf.empty()) {
-            stream->write(localBuf.data(), localBuf.size());
+        {
+			std::lock_guard<std::mutex> lock(dataMutex);
+            outgoingGuaranteed[sequenceNum] = info;
         }
     }
 }
@@ -390,27 +471,35 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, boost::asi
         if (!pkt) return;
         pkt->setRemote(remoteIP, remotePort);
 
+        // Check for ACK and handle guaranteed delivery before buffering/dispatching
+        // This ensures ACKs are sent immediately even if packet gets bufffered as out-of-order
+        if (checkForAck(pkt)) {
+            return; // Was an ACK packet, already handled
+        }
+
         std::vector<std::shared_ptr<Packet>> dispatch;
-        if (allowOutofOrder) {
+        if (allowOutofOrder || reliableMode == RELIABLE) {
             dispatch.push_back(pkt);
-            std::lock_guard<std::mutex> lock(dataMutex);
-            // If any remaining packets in incoming packets add to dispatch
-            for (const auto& p : incomingPackets) {
-                dispatch.push_back(p.second);
+            if (reliableMode == UNRELIABLE) {
+                // Update remoteOrders even in out-of-order mode for repeat detection (UNRELIABLE mode only)
+                updateRemoteOrder(pkt);
+				std::lock_guard<std::mutex> lock(dataMutex);
+                // If any remaining packets in incoming packets add to dispatch
+                for (const auto& p : incomingPackets) {
+                    dispatch.push_back(p.second);
+                }
             }
         }
-        else {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            const Remote remote = pkt->getRemote();
+        else if (reliableMode == UNRELIABLE) {
             // If it is a new remote and ordering mode is on, add to remote order map
-            auto it = remoteOrders.find(remote);
-            if (it == remoteOrders.end()) {
-                //TimeoutID id{ this, remote };
-                RemoteOrder order{ pkt->getSequenceNum()};
-                remoteOrders[remote] = order;
+            updateRemoteOrder(pkt);
+
+            {
+				std::lock_guard<std::mutex> lock(dataMutex);
+
+                const RemoteExpected expected{ pkt->getRemote(), pkt->getSequenceNum() };
+                incomingPackets[expected] = pkt;
             }
-            const RemoteExpected expected{ pkt->getRemote(), pkt->getSequenceNum() };
-            incomingPackets[expected] = pkt;
 
             dispatch = reorderPackets();
         }
@@ -435,6 +524,17 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, boost::asi
             }
             lastDataTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
             pkt->setRemote(remoteIP, remotePort);
+
+            // Check for ACK and handle guaranteed delivery
+            if (checkForAck(pkt)) {
+                continue; // Was an ACK packet, skip to next packet
+            }
+
+            // Updates remote order for UNRELIABLE mode
+            if (reliableMode == UNRELIABLE) {
+                updateRemoteOrder(pkt);
+            }
+
             callHandlers(pkt);
         }
     }
@@ -442,18 +542,136 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, boost::asi
 
 std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t* data, std::size_t length) {
     std::shared_ptr<SongbirdCore::Packet> pkt;
-    if (length < 2) return pkt;
-    // Parses packet
-    uint8_t currHeader = data[0];
-    uint8_t currSeqNum = data[1];
-    // For packet mode, payload length is implicit: consume all remaining data
-    std::vector<uint8_t> payload;
-    if (length > 2) {
-        payload.insert(payload.end(), data + 2, data + length);
+
+    if (reliableMode == RELIABLE) {
+        // RELIABLE mode: [header][payload]
+        if (length < 1) return pkt;
+        uint8_t currHeader = data[0];
+        std::vector<uint8_t> payload;
+        if (length > 1) {
+            payload.insert(payload.end(), data + 1, data + length);
+        }
+        pkt = std::make_shared<Packet>(currHeader, payload);
     }
-    pkt = std::make_shared<Packet>(currHeader, payload);
-    pkt->setSequenceNum(currSeqNum);
+    else {
+        // UNRELIABLE mode: [header][seq][guaranteed][payload]
+        if (length < 2) return pkt;
+        uint8_t currHeader = data[0];
+        uint8_t currSeqNum = data[1];
+        // For packet mode, third byte may be guaranteed flag
+        size_t payloadOffset = 3;
+        uint8_t guaranteed = data[2];
+        // payload length is implicit: consume all remaining data
+        std::vector<uint8_t> payload;
+        if (length > payloadOffset) {
+            payload.insert(payload.end(), data + payloadOffset, data + length);
+        }
+        pkt = std::make_shared<Packet>(currHeader, payload);
+        pkt->setSequenceNum(currSeqNum);
+        if (guaranteed) pkt->setGuaranteed();
+    }
     return pkt;
+}
+
+std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStream() {
+	std::lock_guard<std::mutex> lock(dataMutex);
+    std::shared_ptr<SongbirdCore::Packet> pkt;
+
+    if (reliableMode == RELIABLE) {
+        // RELIABLE mode: [header][length][payload]
+        if (newPacket) {
+            if (readBuffer.size() < 2) return pkt; // need at least header and length
+            newPacket = false;
+        }
+        // Do we have the full payload?
+        uint8_t currPayloadLen = readBuffer[1];
+        if (readBuffer.size() < 2 + static_cast<std::size_t>(currPayloadLen)) return pkt;
+        newPacket = true;
+        // we have a full packet in readBuffer; construct it
+        uint8_t currHeader = readBuffer[0];
+        std::vector<uint8_t> payload;
+        payload.insert(payload.end(), readBuffer.begin() + 2, readBuffer.begin() + 2 + currPayloadLen);
+        pkt = std::make_shared<Packet>(currHeader, payload);
+        // erase consumed bytes
+        readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 2 + currPayloadLen);
+    }
+    else {
+        // UNRELIABLE mode: [header][length][seq][guaranteed][payload]
+        if (newPacket) {
+            if (readBuffer.size() < 4) return pkt; // need at least header, len, seq, guaranteed flag
+            newPacket = false;
+        }
+        // Do we have the full payload?
+        uint8_t currPayloadLen = readBuffer[1];
+        if (readBuffer.size() < 4 + static_cast<std::size_t>(currPayloadLen)) return pkt;
+        newPacket = true;
+        // we have a full packet in readBuffer; construct it
+        uint8_t currHeader = readBuffer[0];
+        uint8_t currSeqNum = readBuffer[2];
+        uint8_t guaranteed = readBuffer[3];
+
+        std::vector<uint8_t> payload;
+        payload.insert(payload.end(), readBuffer.begin() + 4, readBuffer.begin() + 4 + currPayloadLen);
+        pkt = std::make_shared<Packet>(currHeader, payload);
+        pkt->setSequenceNum(currSeqNum);
+        if (guaranteed) pkt->setGuaranteed();
+
+        // erase consumed bytes
+        readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 4 + currPayloadLen);
+    }
+    return pkt;
+}
+
+void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
+    uint8_t header = pkt->getHeader();
+    Remote remote = pkt->getRemote();
+    // Lookup and store handlers under locks, but invoke them outside locks
+    ReadHandler headerHandler = nullptr;
+    ReadHandler remoteHandler = nullptr;
+    ReadHandler globalHandler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+
+        auto it = headerHandlers.find(header);
+        if (it != headerHandlers.end()) headerHandler = it->second;
+        // update header map (single latest packet)
+        headerMap[header] = pkt;
+
+        auto it2 = remoteHandlers.find(remote);
+        if (it2 != remoteHandlers.end()) remoteHandler = it2->second;
+        // update last remote map
+        remoteMap[remote] = pkt;
+
+        globalHandler = readHandler;
+    }
+
+    // Notify one specific waiter (if any) for header and remote
+    {
+        std::lock_guard<std::mutex> wlock(waitMutex);
+        auto hit = headerWaiters.find(header);
+        if (hit != headerWaiters.end() && !hit->second.empty()) {
+            // notify the first registered waiter for this header
+            std::shared_ptr<Waiter> waiter = hit->second.front();
+            {
+                std::lock_guard<std::mutex> lk(waiter->mtx);
+                waiter->signalled.store(true);
+                waiter->cv.notify_one();
+            }
+        }
+        auto rit = remoteWaiters.find(remote);
+        if (rit != remoteWaiters.end() && !rit->second.empty()) {
+            std::shared_ptr<Waiter> waiter = rit->second.front();
+            {
+                std::lock_guard<std::mutex> lk(waiter->mtx);
+                waiter->signalled.store(true);
+                waiter->cv.notify_one();
+            }
+        }
+    }
+
+    if (headerHandler) headerHandler(pkt);
+    if (remoteHandler) remoteHandler(pkt);
+    if (globalHandler) globalHandler(pkt);
 }
 
 std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets()
@@ -465,7 +683,7 @@ std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets(
     for (auto itOrder = remoteOrders.begin(); itOrder != remoteOrders.end(); ++itOrder)
     {
         Remote r = itOrder->first;
-        RemoteOrder& order = itOrder->second;   // ? REFERENCE, not copy
+        RemoteOrder& order = itOrder->second;
 
         auto remotePackets = reorderRemote(r, order);
         dispatch.insert(dispatch.end(), remotePackets.begin(), remotePackets.end());
@@ -546,7 +764,7 @@ void SongbirdCore::onMissingTimeout(const Remote remote) {
             dispatch = reorderRemote(remote, order);
         }
         else {
-            // No packets for this remote \b delete it safely
+            // No packets for this remote, delete it safely
             remoteOrders.erase(it);
             remoteMap.erase(remote);
         }
@@ -558,88 +776,132 @@ void SongbirdCore::onMissingTimeout(const Remote remote) {
     }
 }
 
-std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStream() {
+void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
     std::lock_guard<std::mutex> lock(dataMutex);
-    std::shared_ptr<SongbirdCore::Packet> pkt;
-    if (newPacket) {
-        // Must be called with dataMutex locked if used internally; it's safe to call without external lock
-        if (readBuffer.size() < 2) return pkt; // need at least header, len
-
-        newPacket = false;
-    }
-    // Do we have the full payload?
-    uint8_t currPayloadLen = readBuffer[1];
-    if (readBuffer.size() < 2 + static_cast<std::size_t>(readBuffer[1])) return pkt;
-    newPacket = true;
-    // we have a full packet in readBuffer; construct it
-    uint8_t currHeader = readBuffer[0];
-
-    std::vector<uint8_t> payload;
-    payload.insert(payload.end(), readBuffer.begin() + 2, readBuffer.begin() + 2 + currPayloadLen);
-    pkt = std::make_shared<Packet>(currHeader, payload);
-
-    // erase consumed bytes
-    readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 2 + currPayloadLen);
-    return pkt;
-}
-
-void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
-    uint8_t header = pkt->getHeader();
     Remote remote = pkt->getRemote();
-    // Lookup and store handlers under locks, but invoke them outside locks
-    ReadHandler headerHandler = nullptr;
-    ReadHandler remoteHandler = nullptr;
-    ReadHandler globalHandler = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(dataMutex);
+    uint8_t seqNum = pkt->getSequenceNum();
 
-        auto it = headerHandlers.find(header);
-        if (it != headerHandlers.end()) headerHandler = it->second;
-        // update header map (single latest packet)
-        headerMap[header] = pkt;
-
-        auto it2 = remoteHandlers.find(remote);
-        if (it2 != remoteHandlers.end()) remoteHandler = it2->second;
-        // update last remote map
-        remoteMap[remote] = pkt;
-
-        globalHandler = readHandler;
+    auto it = remoteOrders.find(remote);
+    if (it == remoteOrders.end()) {
+        RemoteOrder order = { seqNum };
+        remoteOrders[remote] = order;
+        it = remoteOrders.find(remote); // Update iterator to point to the newly inserted entry
     }
 
-    // Notify one specific waiter (if any) for header and remote
-    {
-        std::lock_guard<std::mutex> wlock(waitMutex);
-        auto hit = headerWaiters.find(header);
-        if (hit != headerWaiters.end() && !hit->second.empty()) {
-            // notify the first registered waiter for this header
-            std::shared_ptr<Waiter> waiter = hit->second.front();
-            {
-                std::lock_guard<std::mutex> lk(waiter->mtx);
-                waiter->signalled.store(true);
-                waiter->cv.notify_one();
-            }
-        }
-        auto rit = remoteWaiters.find(remote);
-        if (rit != remoteWaiters.end() && !rit->second.empty()) {
-            std::shared_ptr<Waiter> waiter = rit->second.front();
-            {
-                std::lock_guard<std::mutex> lk(waiter->mtx);
-                waiter->signalled.store(true);
-                waiter->cv.notify_one();
-            }
-        }
-    }
+    if (allowOutofOrder) {
+        // Update expected sequence num
+        it->second.expectedSeqNum = seqNum + 1;
 
-    if (headerHandler) headerHandler(pkt);
-    if (remoteHandler) remoteHandler(pkt);
-    if (globalHandler) globalHandler(pkt);
+        // Restart missing timer to clean up inactive remotes
+        it->second.missingTimerActive = true;
+        it->second.missingTimerStart = std::chrono::steady_clock::now();
+        // Notify timer thread to re-evaluate
+        missingTimerCv.notify_all();
+    }
 }
+
+bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
+	// Only check for repeat if guaranteed delivery is enabled
+	if (!pkt->isGuaranteed()) return false;
+
+    uint8_t seqNum = pkt->getSequenceNum();
+    Remote remote = pkt->getRemote();
+
+    std::lock_guard<std::mutex> lock(dataMutex);
+    auto it = remoteOrders.find(remote);
+    if (it != remoteOrders.end()) {
+        uint8_t expectedSeq = it->second.expectedSeqNum;
+        std::cout << "[DEBUG] Packet detected: seq " << static_cast<int>(seqNum)
+            << " (expected " << static_cast<int>(expectedSeq) << ") from "
+            << remote.ip.to_string() << ":" << remote.port << "\n";
+        // Check if this sequence number is less than expected
+        // Use signed 8-bit arithmetic to handle wraparound correctly
+        int8_t diff = (int8_t)seqNum - (int8_t)expectedSeq;
+        if (diff < 0 && diff > -128) {
+            // This is a repeat packet (sequence is in the past)
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SongbirdCore::checkForAck(std::shared_ptr<Packet> pkt) {
+    // ACK handling and repeat detection only in UNRELIABLE mode
+    if (reliableMode != UNRELIABLE) {
+        return false; // No ACK handling in RELIABLE mode
+    }
+
+    // Check if this is an ACK packet (header 0x00)
+    if (pkt->getHeader() == 0x00) {
+        // This is an ACK packet - remove the acknowledged packet from retransmit queue
+        uint8_t ackSeq = pkt->getSequenceNum();
+        removeAcknowledgedPacket(ackSeq);
+        return true; // ACK handled, don't dispatch to handlers
+    }
+
+    // Not an ACK packet - check if we need to send an ACK for this packet
+    if (pkt->isGuaranteed()) {
+        // Send ACK back to sender (even for repeats, in case original ACK was dropped)
+        uint8_t seqNum = pkt->getSequenceNum();
+        boost::asio::ip::address remoteIP = pkt->getRemoteIP();
+        uint16_t remotePort = pkt->getRemotePort();
+        
+        // Create ACK packet
+        Packet ackPkt(0x00); // ACK header
+        ackPkt.setRemote(remoteIP, remotePort);
+        // Send ACK packet
+        sendPacket(ackPkt, seqNum, false);
+    }
+
+    // Return true if it's a repeat (don't dispatch to handlers)
+    return isRepeatPacket(pkt);
+}
+
+void SongbirdCore::removeAcknowledgedPacket(uint8_t seqNum) {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    auto it = outgoingGuaranteed.find(seqNum);
+    if (it != outgoingGuaranteed.end()) {
+		// Log acknowledgement with number of retransmits
+        outgoingGuaranteed.erase(it);
+    }
+}
+
+void SongbirdCore::onRetransmissionTimeout(uint8_t seqNum) {
+    bool needsResend = false;
+    OutgoingInfo info;
+    {
+		std::lock_guard<std::mutex> lock(dataMutex);
+        auto it = outgoingGuaranteed.find(seqNum);
+        if (it != outgoingGuaranteed.end()) {
+            // Copy info before potentially erasing
+            info = it->second;
+            
+            // Check if max retransmit attempts reached (0 means infinite retries)
+            if (maxRetransmitAttempts > 0 && it->second.retransmitCount >= maxRetransmitAttempts) {
+                // Remove from tracking after max attempts
+                outgoingGuaranteed.erase(it);
+            } else {
+                needsResend = true;
+                // Increment retransmit counter
+                it->second.retransmitCount++;
+                // Update send time
+                it->second.sendTime = std::chrono::steady_clock::now();
+            }
+        }
+    }
+
+    if (needsResend) {
+        // Resend packet
+        sendPacket(*info.packet.get(), info.packet->getSequenceNum(), false);
+    }
+}
+
+
 
 void SongbirdCore::flush() {
     {
         std::lock_guard<std::mutex> lock(dataMutex);
         readBuffer.clear();
-        writeBuffer.clear();
         incomingPackets.clear();
         headerMap.clear();
         newPacket = true;
@@ -656,19 +918,8 @@ std::size_t SongbirdCore::getNumIncomingPackets() {
     return incomingPackets.size();
 }
 
-std::size_t SongbirdCore::getWriteBufferSize() {
-    std::lock_guard<std::mutex> lock(dataMutex);
-    return writeBuffer.size();
-}
-
 void SongbirdCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {
     std::lock_guard<std::mutex> lock(dataMutex);
     if (length == 0) return;
     readBuffer.insert(readBuffer.end(), data, data + length);
-}
-
-void SongbirdCore::appendToWriteBuffer(const uint8_t* data, std::size_t length) {
-    std::lock_guard<std::mutex> lock(dataMutex);
-    if (length == 0) return;
-    writeBuffer.insert(writeBuffer.end(), data, data + length);
 }

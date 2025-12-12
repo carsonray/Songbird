@@ -10,12 +10,14 @@
 #include <algorithm>
 
 #define MODE SongbirdCore::PACKET
+#define RELIABILITY SongbirdCore::UNRELIABLE
 
 class MockStream : public IStream {
 public:
-    MockStream(std::string name) : protocol(std::make_shared<SongbirdCore>(name, MODE)), peer(nullptr), open(true) {
+    MockStream(std::string name) : protocol(std::make_shared<SongbirdCore>(name, MODE, RELIABILITY)), peer(nullptr), open(true), blocked(false) {
         protocol->attachStream(this);
         protocol->setMissingPacketTimeout(10);
+        protocol->setRetransmitTimeout(200); // Short timeout for testing
     }
     ~MockStream() {
 
@@ -30,8 +32,12 @@ public:
     void write(const uint8_t* buffer, std::size_t length) override {
         // Deliver bytes directly into peer's incoming buffer
         if (!peer) return;
+        // Check if peer is blocked from receiving
+        if (peer->blocked) return;
         peer->incoming.insert(peer->incoming.end(), buffer, buffer + length);
     }
+
+    bool supportsRemoteWrite() const override { return false; }
 
     void updateData() {
         // Reads any available data from serial stream
@@ -43,12 +49,16 @@ public:
 
     bool isOpen() const override { return open; }
     void close() override { open = false; }
+    
+    void setBlocked(bool block) { blocked = block; }
+    bool isBlocked() const { return blocked; }
 
 private:
     std::shared_ptr<SongbirdCore> protocol;
     MockStream* peer;
     std::vector<uint8_t> incoming;
     bool open;
+    bool blocked;
 };
 
 struct LinkedCores {
@@ -175,9 +185,11 @@ void test_reliability_off() {
     });
 
     // Send three packets with out of order sequence numbers
-    uint8_t seqNums[3] = {0, 3, 1};
+    // Note: Avoid header 0x00 as it's reserved for ACK
+    uint8_t seqNums[3] = {1, 3, 2};
+    uint8_t sendHeaders[3] = {0x10, 0x13, 0x12};
     for (uint8_t i = 0; i < 3; ++i) {
-        auto p = a->createPacket(seqNums[i]);
+        auto p = a->createPacket(sendHeaders[i]);
         p.writeByte(seqNums[i]);
         a->sendPacket(p, seqNums[i]);
         // Give B the bytes
@@ -188,9 +200,9 @@ void test_reliability_off() {
     vTaskDelay(pdMS_TO_TICKS(50));
 
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[2], "Third header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[0], headers[0], "First header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[1], headers[1], "Second header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[2], headers[2], "Third header");
 }
 
 void test_ordering_reliability() {
@@ -206,10 +218,12 @@ void test_ordering_reliability() {
     });
 
     // Send three packets with out of order sequence numbers
-    // Has to start with zero otherwise needs extra updates
-    uint8_t seqNums[3] = {0, 3, 1};
+    // Note: Avoid header 0x00 as it's reserved for ACK
+    // Start with seq 1 to avoid needing extra updates for ordering
+    uint8_t seqNums[3] = {1, 4, 2};
+    uint8_t sendHeaders[3] = {0x11, 0x14, 0x12};
     for (uint8_t i = 0; i < 3; ++i) {
-        auto p = a->createPacket(seqNums[i]);
+        auto p = a->createPacket(sendHeaders[i]);
         p.writeByte(seqNums[i]);
         a->sendPacket(p, seqNums[i]);
         // Give B the bytes
@@ -220,9 +234,9 @@ void test_ordering_reliability() {
     vTaskDelay(pdMS_TO_TICKS(50));
 
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(3, headers[2], "Third header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[0], headers[0], "First header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[2], headers[1], "Second header");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[1], headers[2], "Third header");
 }
 
 void test_integer_payload() {
@@ -269,6 +283,105 @@ void test_float_payload() {
     TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.0001f, fv, got, "Float value mismatch");
 }
 
+void test_guaranteed_delivery_with_retransmit() {
+    auto cores = makeLinkedCores();
+    auto a = cores.coreA;
+    auto b = cores.coreB;
+
+    int receiveCount = 0;
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        receiveCount++;
+        received = pkt;
+    });
+
+    // Block B from receiving (simulates packet loss or unresponsive receiver)
+    cores.streamB->setBlocked(true);
+
+    // Send guaranteed packet from A
+    auto pkt = a->createPacket(0x50);
+    pkt.writeByte(0xAA);
+    a->sendPacket(pkt, true); // guaranteeDelivery = true
+
+    // A sends the packet, but B is blocked
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, receiveCount, "B should not receive packet while blocked");
+
+    // Wait for first retransmit timeout
+    vTaskDelay(pdMS_TO_TICKS(60));
+    
+    // A should have retransmitted, but B is still blocked
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, receiveCount, "B should still not receive while blocked");
+
+    // Unblock B
+    cores.streamB->setBlocked(false);
+
+    // Wait for another retransmit timeout (need to wait full timeout period)
+    vTaskDelay(pdMS_TO_TICKS(250));
+    
+    // B should now receive the retransmitted packet and send ACK
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, receiveCount, "B should receive packet after unblocking");
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "B should have received a packet");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x50, received->getHeader(), "Header mismatch");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0xAA, received->readByte(), "Payload content");
+
+    // A should receive the ACK
+    cores.streamA->updateData();
+
+    // Wait to ensure no more retransmits occur after ACK
+    vTaskDelay(pdMS_TO_TICKS(80));
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, receiveCount, "Should not receive duplicate after ACK");
+}
+
+void test_repeat_blocking() {
+    auto cores = makeLinkedCores();
+    auto a = cores.coreA;
+    auto b = cores.coreB;
+
+    int receiveCount = 0;
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        receiveCount++;
+        received = pkt;
+    });
+
+    // Send first packet to establish sequence number
+    auto pkt1 = a->createPacket(0x60);
+    pkt1.writeByte(0xBB);
+    a->sendPacket(pkt1);
+    
+    // B receives the first packet
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, receiveCount, "B should receive first packet");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0xBB, received->readByte(), "First packet payload");
+
+    // Send second packet with higher sequence number
+    auto pkt2 = a->createPacket(0x61);
+    pkt2.writeByte(0xCC);
+    a->sendPacket(pkt2, true);
+    
+    // B receives the second packet
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, receiveCount, "B should receive second packet");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0xCC, received->readByte(), "Second packet payload");
+    
+    // A receives ACK from B
+    cores.streamA->updateData();
+
+    // Now manually send a packet with a lower sequence number (repeat)
+    auto pkt3 = a->createPacket(0x62);
+    pkt3.writeByte(0xDD);
+    // Use sequence number 255 which is lower than the current sequence (with wraparound)
+    a->sendPacket(pkt3, 255, true);
+    
+    // B should receive the packet but filter it as a repeat
+    cores.streamB->updateData();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, receiveCount, "B should block repeat packet");
+}
+
 void setup() {
     UNITY_BEGIN();
     RUN_TEST(test_basic_send_receive);
@@ -278,6 +391,8 @@ void setup() {
     RUN_TEST(test_ordering_reliability);
     RUN_TEST(test_integer_payload);
     RUN_TEST(test_float_payload);
+    RUN_TEST(test_guaranteed_delivery_with_retransmit);
+    RUN_TEST(test_repeat_blocking);
     UNITY_END();
 }
 

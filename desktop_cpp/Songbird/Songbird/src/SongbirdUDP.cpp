@@ -8,7 +8,8 @@ SongbirdUDP::SongbirdUDP(std::string name)
     : socket(std::make_shared<boost::asio::ip::udp::socket>(ioContext)), protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::PACKET)), broadcastMode(false), multicastMode(false), localPort(0)
 {
     protocol->attachStream(this);
-    protocol->setMissingPacketTimeout(10);
+    protocol->setMissingPacketTimeout(100);
+	protocol->setRetransmissionTimeout(100);
 }
 
 SongbirdUDP::~SongbirdUDP() {
@@ -193,7 +194,7 @@ bool SongbirdUDP::isBound() const {
 }
 
 void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
-    if (!socket || !socket->is_open()) return;
+    if (!isOpen()) return;
     if (!broadcastMode) {
         if (bindMode) {
             socket->async_send(boost::asio::buffer(buffer, length), [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
@@ -217,4 +218,24 @@ void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
 
 bool SongbirdUDP::isOpen() const {
     return socket && socket->is_open();
+}
+
+bool SongbirdUDP::supportsRemoteWrite() const {
+    return true;
+}
+
+void SongbirdUDP::writeToRemote(const uint8_t* buffer, std::size_t length, const boost::asio::ip::address& ip, uint16_t port) {
+    if (!isOpen()) return;
+	// Construct endpoint from given IP and port
+	boost::asio::ip::udp::endpoint endpoint(ip, port);
+    // Use writeTo to send to specific remote without changing default remote
+    socket->async_send_to(boost::asio::buffer(buffer, length), endpoint, [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
+        if (ec) std::cerr << "UDP send error: " << ec.message() << std::endl;
+        });
+}
+
+bool SongbirdUDP::getDefaultRemote(boost::asio::ip::address& outIP, uint16_t& outPort) {
+    outIP = remoteIP;
+    outPort = remotePort;
+    return remotePort != 0; // Return true if we have a valid remote
 }

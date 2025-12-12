@@ -1,7 +1,7 @@
 #include "SongbirdUART.h"
 
 SongbirdUART::SongbirdUART(std::string name)
-    : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM)) {
+    : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM, SongbirdCore::UNRELIABLE)) {
         protocol->attachStream(this);
 }
 

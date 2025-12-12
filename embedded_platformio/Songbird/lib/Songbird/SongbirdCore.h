@@ -31,6 +31,11 @@ class SongbirdCore {
             STREAM,
             PACKET
         };
+        
+        enum ReliableMode {
+            UNRELIABLE,  // Uses sequence numbers and guaranteed delivery
+            RELIABLE     // Does not use sequence numbers or guaranteed delivery
+        };
 
         struct Remote {
             IPAddress ip;
@@ -84,6 +89,9 @@ class SongbirdCore {
             }
         };
 
+        // Timer helper for retransmission
+        struct RetransmitID { SongbirdCore* owner; uint8_t seq; };
+
         class Packet {
         public:
             // Creates blank packet
@@ -92,7 +100,7 @@ class SongbirdCore {
             Packet(uint8_t header, const std::vector<uint8_t>& payload);
 
             // Converts packet to byte vector for transmission
-            std::vector<uint8_t> toBytes(SongbirdCore::ProcessMode mode) const;
+            std::vector<uint8_t> toBytes(SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode) const;
 
             // Sets sequence number
             void setSequenceNum(uint8_t seqNum);
@@ -105,9 +113,14 @@ class SongbirdCore {
 
             // Remote info (for server mode responses)
             void setRemote(const IPAddress& ip, uint16_t port);
+            void setRemote(const Remote& remote);
             Remote getRemote() const;
             IPAddress getRemoteIP() const;
             uint16_t getRemotePort() const;
+
+            // Marks the packet as guaranteed
+            void setGuaranteed(bool guaranteed = true) { guaranteedFlag = guaranteed; }
+            bool isGuaranteed() const { return guaranteedFlag; }
 
             // Writing functions
             void writeBytes(const uint8_t* buffer, std::size_t length);
@@ -134,14 +147,25 @@ class SongbirdCore {
             // read cursor into payload
             mutable std::size_t readPos = 0;
 
+            // Guaranteed delivery flag
+            bool guaranteedFlag = false;
+
             // Remote info (for server mode responses)
             IPAddress remoteIP;
             uint16_t remotePort = 0;
         };
 
+        // Outgoing guaranteed packets by sequence number
+        struct OutgoingInfo {
+            std::shared_ptr<SongbirdCore::Packet> pkt;
+            Remote remote;
+            TimerHandle_t timer = nullptr;
+            uint8_t retransmitCount = 0;
+        };
+
         using ReadHandler = std::function<void(std::shared_ptr<SongbirdCore::Packet>)>;
 
-        SongbirdCore(std::string name, ProcessMode mode = PACKET);
+        SongbirdCore(std::string name, ProcessMode mode = PACKET, ReliableMode reliableMode = UNRELIABLE);
         ~SongbirdCore();
 
         //Sets general read handler (invoked for all incoming packets)
@@ -169,6 +193,13 @@ class SongbirdCore {
         // Configure missing-packet timeout (ms)
         void setMissingPacketTimeout(uint32_t ms);
         void onMissingTimeout(const Remote remote);
+        void onRetransmitTimeout(uint8_t seqNum);
+
+        // Configure retransmit timeout for guaranteed packets (ms)
+        void setRetransmitTimeout(uint32_t ms);
+        
+        // Configure maximum retransmit attempts (0 = infinite)
+        void setMaxRetransmitAttempts(uint8_t attempts);
 
         // Whether out of order packets are allowed (less latency)
         void setAllowOutofOrder(bool allow);
@@ -176,29 +207,20 @@ class SongbirdCore {
         std::size_t getNumIncomingPackets();
 
         ////////////////////////////////////////////
-        // Specific to stream mode
-        // Holds a packet in the write buffer
-        void holdPacket(const Packet& packet);
-
-        // Sends all data in write buffer
-        void sendAll();
+        // Both modes
 
         // Flushes all buffers
         void flush();
 
         // Gets buffer sizes
         std::size_t getReadBufferSize();
-        std::size_t getWriteBufferSize();
-
-        //////////////////////////////////////////////
-        // Both modes
 
         // Creates a new packet
         Packet createPacket(uint8_t header);
 
         // Sends a packet
-        void sendPacket(Packet& packet);
-        void sendPacket(Packet& packet, uint8_t seqNum);
+        void sendPacket(Packet& packet, bool guaranteeDelivery = false);
+        void sendPacket(Packet& packet, uint8_t seqNum, bool guaranteeDelivery = false);
 
         // Parses data from stream
         void parseData(const uint8_t* data, std::size_t length);
@@ -209,10 +231,12 @@ class SongbirdCore {
         std::string name;
         IStream* stream;
         std::vector<uint8_t> readBuffer;
-        std::vector<uint8_t> writeBuffer;
 
         //Process mode
         ProcessMode processMode;
+        
+        //Reliable mode
+        ReliableMode reliableMode;
 
         ///////////////////////////////////////
         // Specific to packet mode
@@ -228,16 +252,30 @@ class SongbirdCore {
         // does not arrive within this window, the core will advance to the
         // next available sequence to avoid blocking forever.
         uint32_t missingPacketTimeoutMs;
+        
+        // Retransmit timeout for guaranteed packets (milliseconds)
+        uint32_t retransmitTimeoutMs;
+        
+        // Maximum retransmit attempts (0 = infinite retries)
+        uint8_t maxRetransmitAttempts;
 
         uint64_t lastDataTimeMs = 0;
 
         // Handlers by remotes
         std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;
 
+        TimerHandle_t startRetransmitTimer(uint8_t seqNum);
+
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
         std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderPackets();
         std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderRemote(const Remote remote, RemoteOrder& remoteOrder);
         TimerHandle_t startMissingTimer(RemoteOrder& remoteOrder);
+        
+        // Helper to update or create remoteOrder entry
+        void updateRemoteOrder(std::shared_ptr<Packet> pkt);
+        
+        // Helper to check if a packet is a repeat
+        bool isRepeatPacket(std::shared_ptr<Packet> pkt);
 
         ////////////////////////////////////////
         // Specific to stream mode
@@ -253,13 +291,18 @@ class SongbirdCore {
 
         // Buffer management
         void appendToReadBuffer(const uint8_t* data, std::size_t length);
-        void appendToWriteBuffer(const uint8_t* data, std::size_t length);
-
         ////////////////////////////////////////
         // Both modes
 
         // Triggers handlers based on packet
         void callHandlers(std::shared_ptr<Packet> pkt);
+
+        // Remove acknowledged packet from outgoing map and stop timer
+        void removeAcknowledgedPacket(uint8_t seqNum);
+        
+        // Check if packet is an ACK and handle it, or send ACK if packet is guaranteed
+        // Returns true if packet is an ACK (and should not be dispatched to handlers)
+        bool checkForAck(std::shared_ptr<Packet> pkt);
 
         // Short critical sections use a spinlock (portMUX). Longer operations
         // can use semaphores if needed. Using spinlocks avoids heap usage and
@@ -275,6 +318,8 @@ class SongbirdCore {
         std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> headerMap;
         // last packet received per remote (for waitForRemote)
         std::unordered_map<Remote, std::shared_ptr<SongbirdCore::Packet>, RemoteHasher> remoteMap;
+        // Outgoing guaranteed packet information by sequence number
+        std::unordered_map<uint8_t, OutgoingInfo> outgoingGuaranteed;
 };
 
 template <typename T>

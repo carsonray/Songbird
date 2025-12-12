@@ -40,6 +40,10 @@ public:
     // write helper matching embedded API (sends to configured remote)
     void write(const uint8_t* buffer, std::size_t length) override;
 
+    bool supportsRemoteWrite() const override;
+    void writeToRemote(const uint8_t* buffer, std::size_t length, const boost::asio::ip::address& ip, uint16_t port) override;
+    bool getDefaultRemote(boost::asio::ip::address& outIP, uint16_t& outPort) override;
+
     // Start internal async read loop
     void startAsyncReadLoop();
 

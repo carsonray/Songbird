@@ -7,8 +7,8 @@
 
 // Simple test runner that mirrors the unit tests but uses the hardware
 
-const char *ssid = "*****";
-const char *password = "*****";
+const char *ssid = "myrouter";
+const char *password = "G3tT0Th3W3b";
 
 //Multicast configuration
 const char *multicastIP = "239.255.0.1";
@@ -54,7 +54,7 @@ void setup() {
   core->setHeaderHandler(0x01, [&](std::shared_ptr<SongbirdCore::Packet> pkt) {
     Serial.println("ID request received, sending ID response");
     auto resp = core->createPacket(0x2);
-    core->sendPacket(resp);
+    core->sendPacket(resp, true);
     connected = true;
   });
 
@@ -64,7 +64,7 @@ void setup() {
       if (!connected) {
         // Sends join confirmation back to server
         auto pkt1 = core->createPacket(0x2);
-        core->sendPacket(pkt1);
+        core->sendPacket(pkt1, true);
         connected = true;
       }
       uint8_t cmd = pkt->readByte();

@@ -21,6 +21,9 @@ public:
     void close() override;
 
     void write(const uint8_t* buffer, std::size_t length) override;
+    
+    // UART does not support dynamic remote addressing (point-to-point)
+    bool supportsRemoteWrite() const override { return false; }
 
     // Get the MinBiTCore protocol object
     std::shared_ptr<SongbirdCore> getProtocol();
