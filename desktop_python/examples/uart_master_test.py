@@ -26,6 +26,7 @@ def wait_for_ping(core):
         pkt = core.create_packet(0xFF)  # Ping packet
         core.send_packet(pkt)
         response = core.wait_for_header(0xFF, 1000)
+        core.flush()
         print(".", end="", flush=True)
     
     print("\nPing received from microcontroller.")
