@@ -481,13 +481,16 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, boost::asi
         if (allowOutofOrder || reliableMode == RELIABLE) {
             dispatch.push_back(pkt);
             if (reliableMode == UNRELIABLE) {
-                // Update remoteOrders even in out-of-order mode for repeat detection (UNRELIABLE mode only)
-                updateRemoteOrder(pkt);
+                if (pkt->isGuaranteed()) {
+                    // Update remoteOrders even in out-of-order mode for repeat detection (UNRELIABLE mode only)
+                    updateRemoteOrder(pkt);
+                }
 				std::lock_guard<std::mutex> lock(dataMutex);
                 // If any remaining packets in incoming packets add to dispatch
                 for (const auto& p : incomingPackets) {
                     dispatch.push_back(p.second);
                 }
+                incomingPackets.clear();
             }
         }
         else if (reliableMode == UNRELIABLE) {
@@ -555,7 +558,7 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t
     }
     else {
         // UNRELIABLE mode: [header][seq][guaranteed][payload]
-        if (length < 2) return pkt;
+        if (length < 3) return pkt;
         uint8_t currHeader = data[0];
         uint8_t currSeqNum = data[1];
         // For packet mode, third byte may be guaranteed flag
@@ -783,16 +786,30 @@ void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
 
     auto it = remoteOrders.find(remote);
     if (it == remoteOrders.end()) {
+        // First packet - initialize order
         RemoteOrder order = { seqNum };
         remoteOrders[remote] = order;
         it = remoteOrders.find(remote); // Update iterator to point to the newly inserted entry
+
+        if (!allowOutofOrder) {
+            // In ordering mode, start from this sequence
+            it->second.expectedSeqNum = seqNum;
+        }
+        else {
+            // In allowOutOfOrder mode, expect next after this
+            it->second.expectedSeqNum = seqNum + 1;
+        }
+    }
+    else {
+        // Only update expectedSeqNum in allowOutOfOrder mode
+        // In ordering mode, reorderRemote manages it
+        if (allowOutofOrder) {
+            it->second.expectedSeqNum = seqNum + 1;
+        }
     }
 
     if (allowOutofOrder) {
-        // Update expected sequence num
-        it->second.expectedSeqNum = seqNum + 1;
-
-        // Restart missing timer to clean up inactive remotes
+        // Restart missing timer to clean up inactive remotes (even in allowOutOfOrder mode)
         it->second.missingTimerActive = true;
         it->second.missingTimerStart = std::chrono::steady_clock::now();
         // Notify timer thread to re-evaluate
@@ -811,9 +828,7 @@ bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
     auto it = remoteOrders.find(remote);
     if (it != remoteOrders.end()) {
         uint8_t expectedSeq = it->second.expectedSeqNum;
-        std::cout << "[DEBUG] Packet detected: seq " << static_cast<int>(seqNum)
-            << " (expected " << static_cast<int>(expectedSeq) << ") from "
-            << remote.ip.to_string() << ":" << remote.port << "\n";
+        
         // Check if this sequence number is less than expected
         // Use signed 8-bit arithmetic to handle wraparound correctly
         int8_t diff = (int8_t)seqNum - (int8_t)expectedSeq;

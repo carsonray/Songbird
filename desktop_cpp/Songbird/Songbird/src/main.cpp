@@ -1,4 +1,4 @@
-#define BUILD_UDP_MULTICAST_SERVER_TEST
+#define BUILD_UART_TEST
 
 #if defined(BUILD_UART_TEST)
 #include "../test/UARTMasterTest.hpp"

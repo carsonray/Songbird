@@ -381,16 +381,21 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
         if (allowOutofOrder || reliableMode == RELIABLE) {
             dispatch.push_back(pkt);
             if (reliableMode == UNRELIABLE) {
-                // Update remoteOrders even in out-of-order mode for repeat detection (UNRELIABLE mode only)
-                updateRemoteOrder(pkt);
+                // Update remoteOrders only for guaranteed packets (for repeat detection)
+                if (pkt->isGuaranteed()) {
+                    updateRemoteOrder(pkt);
+                }
                 SpinLockGuard guard(dataSpinlock);
                 // If any remaining packets in incoming packets add to dispatch
                 for (const auto &p: incomingPackets) {
                     dispatch.push_back(p.second);
                 }
+                // Clear incomingPackets after dispatching them
+                incomingPackets.clear();
             }
         } else if (reliableMode == UNRELIABLE) {
             // If it is a new remote and ordering mode is on, add to remote order map
+            // Track sequence numbers for ALL packets in ordering mode
             updateRemoteOrder(pkt);
 
             {
@@ -428,7 +433,7 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
                 continue; // Was an ACK packet, skip to next packet
             }
 
-            // Updates remote order for UNRELIABLE mode
+            // Updates remote order for UNRELIABLE mode (for all packets for sequencing)
             if (reliableMode == UNRELIABLE) {
                 updateRemoteOrder(pkt);
             }
@@ -452,7 +457,7 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t
         pkt = std::make_shared<Packet>(currHeader, payload);
     } else {
         // UNRELIABLE mode: [header][seq][guaranteed][payload]
-        if (length < 2) return pkt;
+        if (length < 3) return pkt;  // Need at least header, seq, and guaranteed flag
         uint8_t currHeader = data[0];
         uint8_t currSeqNum = data[1];
         // For packet mode, third byte may be guaranteed flag
@@ -548,23 +553,53 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
 
 std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets()
 {
-    SpinLockGuard guard(dataSpinlock);
     std::vector<std::shared_ptr<Packet>> dispatch;
-
-    // Iterating through remotes
-    for (auto itOrder = remoteOrders.begin(); itOrder != remoteOrders.end(); ++itOrder)
+    std::vector<std::pair<Remote, RemoteOrder>> needTimers;
+    std::vector<TimerHandle_t> timersToStop;
+    
     {
-        Remote r = itOrder->first;
-        RemoteOrder& order = itOrder->second;   // ← REFERENCE, not copy
+        SpinLockGuard guard(dataSpinlock);
 
-        auto remotePackets = reorderRemote(r, order);
-        dispatch.insert(dispatch.end(), remotePackets.begin(), remotePackets.end());
+        // Iterating through remotes
+        for (auto itOrder = remoteOrders.begin(); itOrder != remoteOrders.end(); ++itOrder)
+        {
+            Remote r = itOrder->first;
+            RemoteOrder& order = itOrder->second;
+
+            auto remotePackets = reorderRemote(r, order, timersToStop);
+            dispatch.insert(dispatch.end(), remotePackets.begin(), remotePackets.end());
+            
+            // Check if this remote needs a timer started
+            if (order.needsTimerStart) {
+                needTimers.push_back({r, order});
+                order.needsTimerStart = false;
+            }
+        }
+    }
+    
+    // Stop timers OUTSIDE the spinlock
+    for (auto timer : timersToStop) {
+        if (timer) {
+            xTimerStop(timer, 0);
+        }
+    }
+    
+    // Start timers OUTSIDE the spinlock
+    for (auto& pair : needTimers) {
+        TimerHandle_t newTimer = startMissingTimer(pair.second);
+        // Update the timer handle back in the map
+        SpinLockGuard guard(dataSpinlock);
+        auto it = remoteOrders.find(pair.first);
+        if (it != remoteOrders.end()) {
+            it->second.missingTimer = newTimer;
+            it->second.missingTimerActive = true;
+        }
     }
 
     return dispatch;
 }
 
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(const SongbirdCore::Remote r, SongbirdCore::RemoteOrder& order) {
+std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(const SongbirdCore::Remote r, SongbirdCore::RemoteOrder& order, std::vector<TimerHandle_t>& timersToStop) {
     std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatch;
     while (true)
     {
@@ -578,7 +613,8 @@ std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(c
             incomingPackets.erase(itPkt);
             order.expectedSeqNum++;
             if (order.missingTimerActive) {
-                xTimerStop(order.missingTimer, 0);
+                // Add timer to stop list instead of stopping directly
+                timersToStop.push_back(order.missingTimer);
                 order.missingTimerActive = false;
             }
             continue;
@@ -589,7 +625,8 @@ std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(c
         // No packets with correct sequence, starting timeout
         if (!order.missingTimerActive)
         {
-            order.missingTimer = startMissingTimer(order);
+            // Set flag instead of calling timer functions directly (called from spinlock context)
+            order.needsTimerStart = true;
             break;
         }
 
@@ -605,11 +642,16 @@ TimerHandle_t SongbirdCore::startMissingTimer(RemoteOrder& order)
         xTimerReset(order.missingTimer, 0);
     } else {
         // Create new timer on first use
+        // Allocate TimeoutID dynamically to ensure it remains valid for timer lifetime
+        auto *id = static_cast<TimeoutID*>(pvPortMalloc(sizeof(TimeoutID)));
+        id->owner = order.timeoutID.owner;
+        id->remote = order.timeoutID.remote;
+        
         TimerHandle_t handle = xTimerCreate(
             "missingTimer",
             pdMS_TO_TICKS(missingPacketTimeoutMs),
             pdFALSE, // one-shot
-            (void *) &order.timeoutID,
+            (void *) id,
             missingTimerCallback
         );
         
@@ -626,6 +668,10 @@ TimerHandle_t SongbirdCore::startMissingTimer(RemoteOrder& order)
 
 void SongbirdCore::onMissingTimeout(const Remote remote) {
     std::vector<std::shared_ptr<Packet>> dispatch;
+    std::vector<TimerHandle_t> timersToStop;
+    TimerHandle_t timerToDelete = nullptr;
+    bool needsReorder = false;
+    
     {
         SpinLockGuard guard(dataSpinlock);
         // Timeout: find nearest forward seqNum for this remote
@@ -657,12 +703,40 @@ void SongbirdCore::onMissingTimeout(const Remote remote) {
         {
             order.expectedSeqNum = bestSeq;
             order.missingTimerActive = false;
-            dispatch = reorderRemote(remote, order);
+            needsReorder = true;
         } else {
             // No packets for this remote — delete it safely
+            // Mark timer for deletion outside the lock
+            if (order.missingTimer) {
+                timerToDelete = order.missingTimer;
+            }
             remoteOrders.erase(it);
             remoteMap.erase(remote);
         }
+    }
+    
+    // Handle reordering outside the spinlock
+    if (needsReorder) {
+        SpinLockGuard guard(dataSpinlock);
+        auto it = remoteOrders.find(remote);
+        if (it != remoteOrders.end()) {
+            dispatch = reorderRemote(remote, it->second, timersToStop);
+        }
+    }
+    
+    // Stop/delete timers OUTSIDE the spinlock
+    for (auto timer : timersToStop) {
+        if (timer) {
+            xTimerStop(timer, 0);
+        }
+    }
+    
+    if (timerToDelete) {
+        xTimerStop(timerToDelete, 0);
+        // Free the TimeoutID allocated when timer was created
+        auto *id = static_cast<TimeoutID*>(pvTimerGetTimerID(timerToDelete));
+        vPortFree(id);
+        xTimerDelete(timerToDelete, 0);
     }
 
     // Call handlers on dispatched packets
@@ -680,24 +754,56 @@ void missingTimerCallback (TimerHandle_t xTimer) {
 }
 
 void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
-    SpinLockGuard guard(dataSpinlock);
     Remote remote = pkt->getRemote();
     uint8_t seqNum = pkt->getSequenceNum();
+    bool needsTimerStart = false;
+    RemoteOrder orderCopy;
     
-    auto it = remoteOrders.find(remote);
-    if (it == remoteOrders.end()) {
-        TimeoutID id{this, remote};
-        RemoteOrder order = {seqNum, id};
-        remoteOrders[remote] = order;
-        it = remoteOrders.find(remote); // Update iterator to point to the newly inserted entry
+    {
+        SpinLockGuard guard(dataSpinlock);
+        auto it = remoteOrders.find(remote);
+        if (it == remoteOrders.end()) {
+            // First packet from this remote - initialize expectedSeqNum
+            TimeoutID id{this, remote};
+            RemoteOrder order = {seqNum, id};
+            remoteOrders[remote] = order;
+            it = remoteOrders.find(remote);
+            
+            // In ordering mode, we expect the next packet after this one
+            // In allowOutOfOrder mode, same thing (for repeat detection)
+            if (!allowOutofOrder) {
+                // In ordering mode, start from this sequence number
+                it->second.expectedSeqNum = seqNum;
+            } else {
+                // In allowOutOfOrder mode, expect the next sequence after this one
+                it->second.expectedSeqNum = seqNum + 1;
+                // Start timer for inactive remote cleanup
+                needsTimerStart = true;
+                orderCopy = it->second;
+            }
+        } else {
+            // Remote order already exists
+            // Only update expectedSeqNum in allowOutOfOrder mode (for repeat detection)
+            // In ordering mode, expectedSeqNum is managed by reorderRemote
+            if (allowOutofOrder) {
+                it->second.expectedSeqNum = seqNum + 1;
+                // Restart timer to keep remote active
+                needsTimerStart = true;
+                orderCopy = it->second;
+            }
+        }
     }
     
-    if (allowOutofOrder) {
-        // Update expected sequence num
-        it->second.expectedSeqNum = seqNum + 1;
-
-        // Restart missing timer to clean up inactive remotes
-        it->second.missingTimer = startMissingTimer(it->second);
+    // Start/restart timer OUTSIDE the spinlock
+    if (needsTimerStart) {
+        TimerHandle_t timer = startMissingTimer(orderCopy);
+        // Update the timer handle back in the map
+        SpinLockGuard guard(dataSpinlock);
+        auto it = remoteOrders.find(remote);
+        if (it != remoteOrders.end()) {
+            it->second.missingTimer = timer;
+            it->second.missingTimerActive = true;
+        }
     }
 }
 
@@ -755,20 +861,37 @@ bool SongbirdCore::checkForAck(std::shared_ptr<Packet> pkt) {
 }
 
 void SongbirdCore::removeAcknowledgedPacket(uint8_t seqNum) {
-    SpinLockGuard guard(dataSpinlock);
-    auto it = outgoingGuaranteed.find(seqNum);
-    if (it != outgoingGuaranteed.end()) {
-        if (it->second.timer) {
-            xTimerStop(it->second.timer, 0);
-            xTimerDelete(it->second.timer, 0);
+    TimerHandle_t timerToStop = nullptr;
+    void* timerID = nullptr;
+    
+    {
+        SpinLockGuard guard(dataSpinlock);
+        auto it = outgoingGuaranteed.find(seqNum);
+        if (it != outgoingGuaranteed.end()) {
+            if (it->second.timer) {
+                timerToStop = it->second.timer;
+                timerID = pvTimerGetTimerID(timerToStop);
+            }
+            outgoingGuaranteed.erase(it);
         }
-        outgoingGuaranteed.erase(it);
+    }
+    
+    // Stop and delete timer OUTSIDE the spinlock
+    if (timerToStop) {
+        xTimerStop(timerToStop, 0);
+        if (timerID) {
+            vPortFree(timerID);
+        }
+        xTimerDelete(timerToStop, 0);
     }
 }
 
 void SongbirdCore::onRetransmitTimeout(uint8_t seqNum) {
     bool needsResend = false;
     OutgoingInfo info;
+    TimerHandle_t timerToCleanup = nullptr;
+    void* timerID = nullptr;
+    
     {
         SpinLockGuard guard(dataSpinlock);
         auto it = outgoingGuaranteed.find(seqNum);
@@ -779,23 +902,35 @@ void SongbirdCore::onRetransmitTimeout(uint8_t seqNum) {
             if (maxRetransmitAttempts > 0 && info.retransmitCount >= maxRetransmitAttempts) {
                 // Max attempts reached, clean up and stop retransmitting
                 if (info.timer) {
-                    xTimerStop(info.timer, 0);
-                    xTimerDelete(info.timer, 0);
+                    timerToCleanup = info.timer;
+                    timerID = pvTimerGetTimerID(info.timer);
                 }
                 outgoingGuaranteed.erase(it);
-                return;
+            } else {
+                // Increment retransmit counter
+                it->second.retransmitCount++;
+                needsResend = true;
             }
-            
-            // Increment retransmit counter
-            it->second.retransmitCount++;
-            needsResend = true;
         }
     }
+    
+    // Clean up timer OUTSIDE the spinlock
+    if (timerToCleanup) {
+        xTimerStop(timerToCleanup, 0);
+        if (timerID) {
+            vPortFree(timerID);
+        }
+        xTimerDelete(timerToCleanup, 0);
+        return;
+    }
+    
     if (needsResend) {
         // Resend packet
         sendPacket(*info.pkt.get(), info.pkt->getSequenceNum(), false);
-        // Restart timer
-        startRetransmitTimer(seqNum);
+        // Restart the existing timer (don't create a new one)
+        if (info.timer) {
+            xTimerReset(info.timer, 0);
+        }
     }
 }
 
@@ -843,8 +978,7 @@ TimerHandle_t SongbirdCore::startRetransmitTimer(uint8_t seqNum) {
         (void*)id,
         retransmitTimerCallback
     );
-    xTimerStop(handle, 0);
-    xTimerChangePeriod(handle, pdMS_TO_TICKS(retransmitTimeoutMs), 0);
+    // Start the timer (no need for stop/change period on a freshly created timer)
     xTimerStart(handle, 0);
     {
         SpinLockGuard guard(dataSpinlock);

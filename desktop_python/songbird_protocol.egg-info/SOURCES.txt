@@ -1,0 +1,12 @@
+README.md
+setup.py
+songbird/__init__.py
+songbird/istream.py
+songbird/songbird_core.py
+songbird/songbird_uart.py
+songbird/songbird_udp.py
+songbird_protocol.egg-info/PKG-INFO
+songbird_protocol.egg-info/SOURCES.txt
+songbird_protocol.egg-info/dependency_links.txt
+songbird_protocol.egg-info/requires.txt
+songbird_protocol.egg-info/top_level.txt

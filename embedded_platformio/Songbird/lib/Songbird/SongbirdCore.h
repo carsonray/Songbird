@@ -65,6 +65,7 @@ class SongbirdCore {
             TimeoutID timeoutID;
             TimerHandle_t missingTimer = nullptr;
             bool missingTimerActive = false;
+            bool needsTimerStart = false;
         };
 
         // Custom hash functor
@@ -268,7 +269,7 @@ class SongbirdCore {
 
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
         std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderPackets();
-        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderRemote(const Remote remote, RemoteOrder& remoteOrder);
+        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderRemote(const Remote remote, RemoteOrder& remoteOrder, std::vector<TimerHandle_t>& timersToStop);
         TimerHandle_t startMissingTimer(RemoteOrder& remoteOrder);
         
         // Helper to update or create remoteOrder entry

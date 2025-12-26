@@ -1,2 +1,2 @@
 // Test switch
-#include "UDPMulticastClientTest.hpp"
+#include "UARTSlaveTest.hpp"
