@@ -172,7 +172,7 @@ int main() {
 
     std::cout << "\nOverall: " << (pass ? "PASS" : "FAIL") << "\n";
 
-    auto embeddedResult = core->waitForHeader(0x00, 2000);
+    auto embeddedResult = core->waitForHeader(0xFE, 2000);
     std::cout << "\nEmbedded test results: " << (embeddedResult && embeddedResult->readByte() ? "PASS" : "FAIL") << "\n";
 
     return 0;

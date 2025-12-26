@@ -170,8 +170,28 @@ int main() {
 
     std::cout << "\nOverall: " << (pass ? "PASS" : "FAIL") << "\n";
 
-    auto embeddedResult = core->waitForHeader(0x00, 2000);
-    std::cout << "\nEmbedded test results: " << (embeddedResult && embeddedResult->readByte() ? "PASS" : "FAIL") << "\n";
+    auto embeddedResult = core->waitForHeader(0xFE, 2000);
+    bool embeddedPass = false;
+    uint8_t firstFailedTest = 0;
+
+    if (embeddedResult && embeddedResult->getPayloadLength() >= 1) {
+        embeddedPass = embeddedResult->readByte();
+        if (embeddedResult->getPayloadLength() >= 2) {
+            firstFailedTest = embeddedResult->readByte();
+        } else {
+			std::cout << "No first failed test index received.\n";
+		}
+    }
+    else {
+		std::cout << "No embedded test result received.\n";
+    }
+
+    std::cout << "\nEmbedded test results: " << (embeddedPass ? "PASS" : "FAIL");
+    if (!embeddedPass && firstFailedTest > 0) {
+        const char* testNames[] = { "", "basic_send_receive", "specific_handler", "request_response", "integer_payload", "float_payload" };
+        std::cout << " (First failed test: " << testNames[firstFailedTest] << ")";
+    }
+    std::cout << "\n";
 
     return 0;
 }

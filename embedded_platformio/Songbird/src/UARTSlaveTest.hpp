@@ -152,27 +152,29 @@ void testsTask(void* pvParameters) {
   waitForPing();
 
   bool pass = true;
+  uint8_t firstFailedTest = 0; // 0 = all pass, 1-5 = test number that failed
 
-  pass &= run_basic_send_receive();
-
-  vTaskDelay(pdMS_TO_TICKS(200));
-
-  pass &= run_specific_handler();
+  if (!run_basic_send_receive()) { if (firstFailedTest == 0) firstFailedTest = 1; pass = false; }
 
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  pass &= run_request_response();
+  if (!run_specific_handler()) { if (firstFailedTest == 0) firstFailedTest = 2; pass = false; }
 
   vTaskDelay(pdMS_TO_TICKS(200));
 
-  pass &= run_integer_payload();
+  if (!run_request_response()) { if (firstFailedTest == 0) firstFailedTest = 3; pass = false; }
+
+  vTaskDelay(pdMS_TO_TICKS(200));
+
+  if (!run_integer_payload()) { if (firstFailedTest == 0) firstFailedTest = 4; pass = false; }
 
   vTaskDelay(pdMS_TO_TICKS(200));
   
-  pass &= run_float_payload();
+  if (!run_float_payload()) { if (firstFailedTest == 0) firstFailedTest = 5; pass = false; }
 
-  auto pkt = core->createPacket(0x00);
+  auto pkt = core->createPacket(0xFE);
   pkt.writeByte(pass ? 0x01 : 0x00);
+  pkt.writeByte(firstFailedTest);
   core->sendPacket(pkt);
 
   vTaskSuspend(NULL); // Suspend this task

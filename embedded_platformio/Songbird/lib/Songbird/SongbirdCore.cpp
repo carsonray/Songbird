@@ -757,7 +757,8 @@ void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
     Remote remote = pkt->getRemote();
     uint8_t seqNum = pkt->getSequenceNum();
     bool needsTimerStart = false;
-    RemoteOrder orderCopy;
+    TimerHandle_t existingTimer = nullptr;
+    TimeoutID timerContext;
     
     {
         SpinLockGuard guard(dataSpinlock);
@@ -779,7 +780,7 @@ void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
                 it->second.expectedSeqNum = seqNum + 1;
                 // Start timer for inactive remote cleanup
                 needsTimerStart = true;
-                orderCopy = it->second;
+                timerContext = it->second.timeoutID;
             }
         } else {
             // Remote order already exists
@@ -788,15 +789,38 @@ void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
             if (allowOutofOrder) {
                 it->second.expectedSeqNum = seqNum + 1;
                 // Restart timer to keep remote active
+                existingTimer = it->second.missingTimer;
                 needsTimerStart = true;
-                orderCopy = it->second;
+                timerContext = it->second.timeoutID;
             }
         }
     }
     
     // Start/restart timer OUTSIDE the spinlock
     if (needsTimerStart) {
-        TimerHandle_t timer = startMissingTimer(orderCopy);
+        TimerHandle_t timer = nullptr;
+        
+        if (existingTimer) {
+            // Reset existing timer
+            xTimerReset(existingTimer, 0);
+            timer = existingTimer;
+        } else {
+            // Create new timer
+            auto *id = static_cast<TimeoutID*>(pvPortMalloc(sizeof(TimeoutID)));
+            id->owner = timerContext.owner;
+            id->remote = timerContext.remote;
+            
+            timer = xTimerCreate(
+                "missingTimer",
+                pdMS_TO_TICKS(missingPacketTimeoutMs),
+                pdFALSE, // one-shot
+                (void *) id,
+                missingTimerCallback
+            );
+            
+            xTimerStart(timer, 0);
+        }
+        
         // Update the timer handle back in the map
         SpinLockGuard guard(dataSpinlock);
         auto it = remoteOrders.find(remote);

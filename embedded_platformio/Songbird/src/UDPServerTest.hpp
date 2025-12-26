@@ -267,7 +267,12 @@ void testsTask(void* pvParameters) {
   Serial.print("Result - float_payload: ");
   Serial.println(r ? "PASS" : "FAIL");
 
-  auto pkt = core->createPacket(0x00);
+
+  // Sends overall result
+  Serial.print("Overall test result: ");
+  Serial.println(pass ? "PASS" : "FAIL");
+
+  auto pkt = core->createPacket(0xFE);
   pkt.writeByte(pass ? 0x01 : 0x00);
   core->sendPacket(pkt);
 
