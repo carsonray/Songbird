@@ -560,10 +560,12 @@ class SongbirdCore:
             if self.allow_out_of_order or self.reliable_mode == ReliableMode.RELIABLE:
                 dispatch.append(pkt)
                 if self.reliable_mode == ReliableMode.UNRELIABLE:
-                    self._update_remote_order(pkt)
+                    if (pkt.is_guaranteed()):
+                        self._update_remote_order(pkt)
                     with self.data_lock:
                         for expected_pkt in list(self.incoming_packets.values()):
                             dispatch.append(expected_pkt)
+                        self.incoming_packets.clear()
             elif self.reliable_mode == ReliableMode.UNRELIABLE:
                 self._update_remote_order(pkt)
                 with self.data_lock:
@@ -774,7 +776,14 @@ class SongbirdCore:
             seq_num = pkt.get_sequence_num()
             
             if remote not in self.remote_orders:
-                self.remote_orders[remote] = RemoteOrder(expected_seq_num=seq_num)
+                self.remote_orders[remote] = RemoteOrder()
+                if not self.allow_out_of_order:
+                    self.remote_orders[remote].expected_seq_num = seq_num
+                else:
+                    self.remote_orders[remote].expected_seq_num = (seq_num + 1) & 0xFF
+            else:
+                if self.allow_out_of_order:
+                    self.remote_orders[remote].expected_seq_num = (seq_num + 1) & 0xFF
             
             if self.allow_out_of_order:
                 self.remote_orders[remote].expected_seq_num = (seq_num + 1) & 0xFF

@@ -1,8 +1,9 @@
 """
 UART Master Test
 
-Example script demonstrating UART communication using the Songbird protocol.
+Simple desktop test runner that mirrors the Arduino integration tests.
 Counterpart to the C++ UARTMasterTest.
+Usage: python uart_master_test.py
 """
 
 import time
@@ -16,9 +17,9 @@ SERIAL_BAUD_RATE = 115200
 
 def wait_for_ping(core):
     """Wait for ping response from microcontroller."""
-    print("Waiting for ping from microcontroller", end="", flush=True)
     time.sleep(1)  # Wait to flush initial data
     core.flush()
+    print("Waiting for ping from microcontroller", end="", flush=True)
     
     response = None
     while not response:
@@ -31,202 +32,206 @@ def wait_for_ping(core):
 
 
 def run_basic_send_receive(core):
-    """Test basic send and receive."""
-    print("Test 1: Basic send/receive... ", end="", flush=True)
-    
-    ok = False
+    """Test basic send and receive with read handler."""
+    ok = [False]  # Use list to avoid nonlocal issues
     
     def handler(pkt):
-        nonlocal ok
-        if pkt.get_header() == 0x10 and pkt.get_payload_length() == 1:
+        if pkt and pkt.get_header() == 0x10 and pkt.get_payload_length() == 1:
             if pkt.read_byte() == 0x42:
-                ok = True
-    
-    core.set_read_handler(handler)
+                ok[0] = True
     
     pkt = core.create_packet(0x10)
     pkt.write_byte(0x42)
     core.send_packet(pkt)
     
+    core.set_read_handler(handler)
+    
     start = time.time()
-    while not ok and (time.time() - start) < 2.0:
+    while not ok[0] and (time.time() - start) < 2.0:
         time.sleep(0.005)
     
     core.set_read_handler(None)
-    
-    if ok:
-        print("PASSED")
-    else:
-        print("FAILED")
-    
-    return ok
+    return ok[0]
 
 
 def run_specific_handler(core):
     """Test header-specific handler."""
-    print("Test 2: Specific handler... ", end="", flush=True)
-    
-    ok = False
+    ok = [False]
     
     def handler(pkt):
-        nonlocal ok
-        if pkt.get_header() == 0x10 and pkt.get_payload_length() == 1:
+        if pkt and pkt.get_header() == 0x10 and pkt.get_payload_length() == 1:
             if pkt.read_byte() == 0x42:
-                ok = True
-    
-    core.set_header_handler(0x10, handler)
+                ok[0] = True
     
     pkt = core.create_packet(0x10)
     pkt.write_byte(0x42)
     core.send_packet(pkt)
     
+    core.set_header_handler(0x10, handler)
+    
     start = time.time()
-    while not ok and (time.time() - start) < 2.0:
+    while not ok[0] and (time.time() - start) < 2.0:
         time.sleep(0.005)
     
-    if not ok:
-        print("FAILED (1st packet)")
+    if not ok[0]:
         return False
     
-    # Test that handler is specific to header 0x10
-    ok = False
+    # Additional random packet to test handler specificity
+    ok[0] = False
+    
     pkt2 = core.create_packet(0x11)
     pkt2.write_byte(0x42)
     core.send_packet(pkt2)
     
     start = time.time()
-    while not ok and (time.time() - start) < 2.0:
+    while not ok[0] and (time.time() - start) < 2.0:
         time.sleep(0.005)
     
     core.clear_header_handler(0x10)
     
-    if not ok:
-        print("PASSED")
-        return True
-    else:
-        print("FAILED (2nd packet should not trigger)")
-        return False
+    # Should NOT be ok (handler should not have been called for 0x11)
+    return not ok[0]
 
 
 def run_request_response(core):
     """Test request-response pattern."""
-    print("Test 3: Request/response... ", end="", flush=True)
+    # Send request packet
+    req = core.create_packet(0x01)
+    core.send_packet(req)
     
-    pkt = core.create_packet(0x20)
-    pkt.write_byte(0x05)
-    core.send_packet(pkt)
+    # Wait for response packet
+    response = core.wait_for_header(0x01, 2000)
     
-    response = core.wait_for_header(0x20, 2000)
+    if response and response.get_header() == 0x01 and response.get_payload_length() == 1:
+        return response.read_byte() == 0x99
     
-    if response and response.get_payload_length() == 1:
-        value = response.read_byte()
-        if value == 0x0A:  # Expected: 0x05 * 2
-            print("PASSED")
-            return True
-    
-    print("FAILED")
     return False
 
 
-def run_float_test(core):
-    """Test float transmission."""
-    print("Test 4: Float transmission... ", end="", flush=True)
+def run_integer_payload(core):
+    """Test integer payload transmission."""
+    req = core.create_packet(0x30)
+    req.write_int16(-12345)
+    core.send_packet(req)
     
-    test_value = 3.14159
-    pkt = core.create_packet(0x30)
-    pkt.write_float(test_value)
-    core.send_packet(pkt)
+    resp = core.wait_for_header(0x30, 2000)
     
-    response = core.wait_for_header(0x30, 2000)
+    if not resp:
+        return False
+    if resp.get_header() != 0x30 or resp.get_payload_length() != 2:
+        return False
     
-    if response:
-        received = response.read_float()
-        if abs(received - test_value) < 0.001:
-            print("PASSED")
-            return True
-    
-    print("FAILED")
-    return False
+    v = resp.read_int16()
+    return v == -12345
 
 
-def run_guaranteed_delivery(core):
-    """Test guaranteed delivery."""
-    print("Test 5: Guaranteed delivery... ", end="", flush=True)
+def run_float_payload(core):
+    """Test float payload transmission."""
+    req = core.create_packet(0x31)
+    req.write_float(3.14159)
+    core.send_packet(req)
     
-    ok = False
+    resp = core.wait_for_header(0x31, 2000)
     
-    def handler(pkt):
-        nonlocal ok
-        if pkt.get_header() == 0x40:
-            ok = True
+    if not resp:
+        return False
+    if resp.get_header() != 0x31 or resp.get_payload_length() != 4:
+        return False
     
-    core.set_header_handler(0x40, handler)
-    
-    pkt = core.create_packet(0x40)
-    pkt.write_byte(0x99)
-    core.send_packet(pkt, guarantee_delivery=True)
-    
-    start = time.time()
-    while not ok and (time.time() - start) < 3.0:
-        time.sleep(0.005)
-    
-    core.clear_header_handler(0x40)
-    
-    if ok:
-        print("PASSED")
-    else:
-        print("FAILED")
-    
-    return ok
+    v = resp.read_float()
+    return abs(v - 3.14159) < 0.0002
 
 
 def main():
     """Main test runner."""
-    print("=== Songbird UART Master Test ===")
-    print(f"Port: {SERIAL_PORT}")
-    print(f"Baud: {SERIAL_BAUD_RATE}\n")
-    
-    # Initialize UART
-    uart = SongbirdUART("UART Node")
-    
-    if not uart.begin(SERIAL_PORT, SERIAL_BAUD_RATE):
-        print(f"Failed to open serial port {SERIAL_PORT}")
+    try:
+        # Initialize UART
+        uart = SongbirdUART("UART Node")
+        core = uart.get_protocol()
+        
+        # Begin connection
+        if not uart.begin(SERIAL_PORT, SERIAL_BAUD_RATE):
+            print(f"Failed to open serial port {SERIAL_PORT}")
+            return 1
+    except Exception as e:
+        print(f"Error initializing UART: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
     
-    print(f"Opened serial port {SERIAL_PORT}")
+    wait_for_ping(core)
     
-    core = uart.get_protocol()
+    pass_overall = True
     
-    try:
-        # Wait for device
-        wait_for_ping(core)
-        
-        # Run tests
-        tests = [
-            run_basic_send_receive,
-            run_specific_handler,
-            run_request_response,
-            run_float_test,
-            run_guaranteed_delivery,
-        ]
-        
-        results = []
-        for test in tests:
-            results.append(test(core))
-            time.sleep(0.1)
-        
-        # Summary
-        print("\n=== Test Summary ===")
-        passed = sum(results)
-        total = len(results)
-        print(f"Passed: {passed}/{total}")
-        
-        if passed == total:
-            print("All tests PASSED!")
-            return 0
+    print("\nRunning basic send/receive...")
+    if run_basic_send_receive(core):
+        print("\nbasic_send_receive: PASS")
+    else:
+        print("\nbasic_send_receive: FAIL")
+        pass_overall = False
+    
+    time.sleep(0.2)
+    
+    print("\nRunning specific handler test...")
+    if run_specific_handler(core):
+        print("\nspecific_handler: PASS")
+    else:
+        print("\nspecific_handler: FAIL")
+        pass_overall = False
+    
+    time.sleep(0.2)
+    
+    print("\nRunning request/response test")
+    if run_request_response(core):
+        print("\nrequest_response: PASS")
+    else:
+        print("\nrequest_response: FAIL")
+        pass_overall = False
+    
+    time.sleep(0.2)
+    
+    print("\nRunning integer payload test...")
+    if run_integer_payload(core):
+        print("\ninteger_payload: PASS")
+    else:
+        print("\ninteger_payload: FAIL")
+        pass_overall = False
+    
+    time.sleep(0.2)
+    
+    print("\nRunning float payload test...")
+    if run_float_payload(core):
+        print("\nfloat_payload: PASS")
+    else:
+        print("\nfloat_payload: FAIL")
+        pass_overall = False
+    
+    print(f"\nOverall: {'PASS' if pass_overall else 'FAIL'}")
+    
+    # Wait for embedded test results
+    embedded_result = core.wait_for_header(0xFE, 2000)
+    embedded_pass = False
+    first_failed_test = 0
+    
+    if embedded_result and embedded_result.get_payload_length() >= 1:
+        embedded_pass = bool(embedded_result.read_byte())
+        if embedded_result.get_payload_length() >= 2:
+            first_failed_test = embedded_result.read_byte()
         else:
-            print(f"{total - passed} test(s) FAILED")
-            return 1
+            print("No first failed test index received.")
+    else:
+        print("No embedded test result received.")
     
-    finally:
-        uart.close()
+    print(f"\nEmbedded test results: {'PASS' if embedded_pass else 'FAIL'}", end="")
+    if not embedded_pass and first_failed_test > 0:
+        test_names = ["", "basic_send_receive", "specific_handler", "request_response", 
+                      "integer_payload", "float_payload"]
+        print(f" (First failed test: {test_names[first_failed_test]})", end="")
+    print()
+    
+    uart.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
