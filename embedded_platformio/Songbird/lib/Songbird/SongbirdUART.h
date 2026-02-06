@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <Arduino.h>
+#include <PacketSerial.h>
 #include "IStream.h"
 #include "SongbirdCore.h"
 
@@ -33,6 +34,10 @@ public:
 
 private:
     std::shared_ptr<SongbirdCore> protocol;
+    PacketSerial packetSerial;
+    
+    // Callback for PacketSerial to handle received packets
+    void onPacketReceived(const uint8_t* buffer, size_t size);
 };
 
 #endif // MINBIT_SERIAL_NODE_H
