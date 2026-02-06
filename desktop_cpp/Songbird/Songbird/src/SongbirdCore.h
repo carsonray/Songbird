@@ -260,10 +260,14 @@ class SongbirdCore {
         bool allowOutofOrder = true;
 
         // Returns the next packet in readBuffer if there is one
-        std::shared_ptr<Packet> packetFromStream();
+        std::shared_ptr<Packet> packetFromStreamCOBS();
 
         // Buffer management
         void appendToReadBuffer(const uint8_t* data, std::size_t length);
+        
+        // COBS encoding/decoding utilities
+        static std::vector<uint8_t> cobsEncode(const uint8_t* data, std::size_t length);
+        static std::vector<uint8_t> cobsDecode(const uint8_t* data, std::size_t length);
         
         ////////////////////////////////////////
         // Both modes

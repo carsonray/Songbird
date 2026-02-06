@@ -382,6 +382,132 @@ void test_repeat_blocking() {
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, receiveCount, "B should block repeat packet");
 }
 
+// STREAM mode tests with COBS encoding
+class StreamMockStream : public IStream {
+public:
+    StreamMockStream(std::string name) : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM, SongbirdCore::UNRELIABLE)), peer(nullptr), open(true) {
+        protocol->attachStream(this);
+        protocol->setMissingPacketTimeout(10);
+    }
+    
+    void setPeer(StreamMockStream* p) { peer = p; }
+    std::shared_ptr<SongbirdCore> getProtocol() { return protocol; }
+    
+    void write(const uint8_t* buffer, std::size_t length) override {
+        if (!peer) return;
+        peer->incoming.insert(peer->incoming.end(), buffer, buffer + length);
+    }
+    
+    bool supportsRemoteWrite() const override { return false; }
+    
+    void updateData() {
+        std::size_t toRead = incoming.size();
+        if (toRead == 0) return;
+        protocol->parseData(incoming.data(), toRead);
+        incoming.clear();
+    }
+    
+    bool isOpen() const override { return open; }
+    void close() override { open = false; }
+    
+private:
+    std::shared_ptr<SongbirdCore> protocol;
+    StreamMockStream* peer;
+    std::vector<uint8_t> incoming;
+    bool open;
+};
+
+void test_stream_mode_basic() {
+    auto s1 = std::make_shared<StreamMockStream>("A");
+    auto s2 = std::make_shared<StreamMockStream>("B");
+    s1->setPeer(s2.get());
+    s2->setPeer(s1.get());
+    
+    auto a = s1->getProtocol();
+    auto b = s2->getProtocol();
+    
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        received = pkt;
+    });
+    
+    auto pkt = a->createPacket(0x70);
+    pkt.writeByte(0xAB);
+    pkt.writeByte(0xCD);
+    a->sendPacket(pkt);
+    
+    s2->updateData();
+    
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "B should receive STREAM mode packet");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x70, received->getHeader(), "Header mismatch in STREAM");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2, received->getPayloadLength(), "Payload length in STREAM");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0xAB, received->readByte(), "First byte");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0xCD, received->readByte(), "Second byte");
+}
+
+void test_stream_mode_multiple_packets() {
+    auto s1 = std::make_shared<StreamMockStream>("A");
+    auto s2 = std::make_shared<StreamMockStream>("B");
+    s1->setPeer(s2.get());
+    s2->setPeer(s1.get());
+    
+    auto a = s1->getProtocol();
+    auto b = s2->getProtocol();
+    
+    std::vector<std::shared_ptr<SongbirdCore::Packet>> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        received.push_back(pkt);
+    });
+    
+    // Send multiple packets
+    for (uint8_t i = 0; i < 3; i++) {
+        auto pkt = a->createPacket(0x71 + i);
+        pkt.writeByte(0x10 + i);
+        a->sendPacket(pkt);
+    }
+    
+    s2->updateData();
+    
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, received.size(), "Should receive 3 packets");
+    for (uint8_t i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x71 + i, received[i]->getHeader(), "Header mismatch");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x10 + i, received[i]->readByte(), "Payload mismatch");
+    }
+}
+
+void test_stream_mode_zero_bytes_in_payload() {
+    auto s1 = std::make_shared<StreamMockStream>("A");
+    auto s2 = std::make_shared<StreamMockStream>("B");
+    s1->setPeer(s2.get());
+    s2->setPeer(s1.get());
+    
+    auto a = s1->getProtocol();
+    auto b = s2->getProtocol();
+    
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        received = pkt;
+    });
+    
+    // Test COBS encoding handles zero bytes in payload correctly
+    auto pkt = a->createPacket(0x75);
+    pkt.writeByte(0x00);  // Zero byte
+    pkt.writeByte(0x01);
+    pkt.writeByte(0x00);  // Another zero byte
+    pkt.writeByte(0x02);
+    a->sendPacket(pkt);
+    
+    s2->updateData();
+    
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Should handle zero bytes in payload");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x75, received->getHeader(), "Header mismatch");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(4, received->getPayloadLength(), "Payload length");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x00, received->readByte(), "First zero byte");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x01, received->readByte(), "Non-zero byte");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x00, received->readByte(), "Second zero byte");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x02, received->readByte(), "Last byte");
+}
+
 void setup() {
     UNITY_BEGIN();
     RUN_TEST(test_basic_send_receive);
@@ -393,6 +519,9 @@ void setup() {
     RUN_TEST(test_float_payload);
     RUN_TEST(test_guaranteed_delivery_with_retransmit);
     RUN_TEST(test_repeat_blocking);
+    RUN_TEST(test_stream_mode_basic);
+    RUN_TEST(test_stream_mode_multiple_packets);
+    RUN_TEST(test_stream_mode_zero_bytes_in_payload);
     UNITY_END();
 }
 
