@@ -195,6 +195,23 @@ class Packet:
         """Write a 32-bit float to the payload (big-endian)."""
         self.payload.extend(struct.pack('>f', value))
 
+    def write_string(self, value: str) -> None:
+        """Write a string with length prefix (uint16_t length + UTF-8 bytes)."""
+        encoded = value.encode('utf-8')
+        length = len(encoded)
+        # Write length as uint16_t (big-endian)
+        self.payload.extend(struct.pack('>H', length))
+        # Write string bytes
+        self.payload.extend(encoded)
+
+    def write_protobuf(self, data: bytes) -> None:
+        """Write a length-prefixed byte array (for protobuf messages)."""
+        length = len(data)
+        # Write length as uint16_t (big-endian)
+        self.payload.extend(struct.pack('>H', length))
+        # Write protobuf bytes
+        self.payload.extend(data)
+
     # Reading functions
     def read_byte(self) -> int:
         """Read a single byte from the payload."""
@@ -230,6 +247,31 @@ class Packet:
         """Read a 16-bit integer from the payload (big-endian)."""
         data = self.read_bytes(2)
         return struct.unpack('>h', data)[0]
+
+    def read_string(self) -> str:
+        """Read a length-prefixed string from the payload."""
+        # Read length (uint16_t, big-endian)
+        length_data = self.read_bytes(2)
+        length = struct.unpack('>H', length_data)[0]
+        
+        # Read string bytes
+        if length == 0:
+            return ""
+        
+        string_data = self.read_bytes(length)
+        return string_data.decode('utf-8', errors='replace')
+
+    def read_protobuf(self) -> bytes:
+        """Read a length-prefixed byte array (for protobuf messages)."""
+        # Read length (uint16_t, big-endian)
+        length_data = self.read_bytes(2)
+        length = struct.unpack('>H', length_data)[0]
+        
+        # Read protobuf bytes
+        if length == 0:
+            return b""
+        
+        return self.read_bytes(length)
 
 
 class SongbirdCore:

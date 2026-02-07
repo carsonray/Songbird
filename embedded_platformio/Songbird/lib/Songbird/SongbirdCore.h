@@ -129,6 +129,11 @@ class SongbirdCore {
             void writeFloat(float value);
             // Writes a 16 bit integer
             void writeInt16(int16_t data);
+            // Writes a string with length prefix (uint16_t length + string bytes)
+            void writeString(const std::string& str);
+            // Writes a length-prefixed byte array (for protobuf messages)
+            void writeProtobuf(const uint8_t* buffer, std::size_t length);
+            void writeProtobuf(const std::vector<uint8_t>& data);
 
             // Reading functions (consume payload bytes)
             uint8_t readByte();
@@ -136,6 +141,10 @@ class SongbirdCore {
             void readBytes(uint8_t* buffer, std::size_t len);
             float readFloat();
             int16_t readInt16();
+            // Reads a length-prefixed string
+            std::string readString();
+            // Reads a length-prefixed byte array (for protobuf messages)
+            std::vector<uint8_t> readProtobuf();
 
             template <typename T>
             T readData();

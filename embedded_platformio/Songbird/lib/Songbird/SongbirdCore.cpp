@@ -164,6 +164,56 @@ int16_t SongbirdCore::Packet::readInt16() {
     return val;
 }
 
+void SongbirdCore::Packet::writeString(const std::string& str) {
+    // Write length as uint16_t (big-endian)
+    uint16_t len = static_cast<uint16_t>(str.length());
+    writeByte(static_cast<uint8_t>((len >> 8) & 0xFF));
+    writeByte(static_cast<uint8_t>(len & 0xFF));
+    // Write string bytes
+    writeBytes(reinterpret_cast<const uint8_t*>(str.c_str()), str.length());
+}
+
+std::string SongbirdCore::Packet::readString() {
+    // Read length (uint16_t, big-endian)
+    uint8_t lenBuf[2];
+    readBytes(lenBuf, 2);
+    uint16_t len = (static_cast<uint16_t>(lenBuf[0]) << 8) | static_cast<uint16_t>(lenBuf[1]);
+    
+    // Read string bytes
+    if (len == 0) return std::string();
+    
+    std::vector<uint8_t> strBuf(len);
+    readBytes(strBuf.data(), len);
+    return std::string(strBuf.begin(), strBuf.end());
+}
+
+void SongbirdCore::Packet::writeProtobuf(const uint8_t* buffer, std::size_t length) {
+    // Write length as uint16_t (big-endian)
+    uint16_t len = static_cast<uint16_t>(length);
+    writeByte(static_cast<uint8_t>((len >> 8) & 0xFF));
+    writeByte(static_cast<uint8_t>(len & 0xFF));
+    // Write protobuf bytes
+    writeBytes(buffer, length);
+}
+
+void SongbirdCore::Packet::writeProtobuf(const std::vector<uint8_t>& data) {
+    writeProtobuf(data.data(), data.size());
+}
+
+std::vector<uint8_t> SongbirdCore::Packet::readProtobuf() {
+    // Read length (uint16_t, big-endian)
+    uint8_t lenBuf[2];
+    readBytes(lenBuf, 2);
+    uint16_t len = (static_cast<uint16_t>(lenBuf[0]) << 8) | static_cast<uint16_t>(lenBuf[1]);
+    
+    // Read protobuf bytes
+    if (len == 0) return std::vector<uint8_t>();
+    
+    std::vector<uint8_t> data(len);
+    readBytes(data.data(), len);
+    return data;
+}
+
 // SongbirdCore implementation
 
 SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode)

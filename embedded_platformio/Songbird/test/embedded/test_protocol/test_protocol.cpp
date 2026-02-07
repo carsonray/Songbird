@@ -475,6 +475,62 @@ void test_stream_mode_multiple_packets() {
     }
 }
 
+void test_string_serialization() {
+    auto cores = makeLinkedCores();
+    auto a = cores.coreA;
+    auto b = cores.coreB;
+
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        received = pkt;
+    });
+
+    auto pkt = a->createPacket(0x80);
+    pkt.writeString("Hello, World!");
+    pkt.writeString("");  // Empty string
+    pkt.writeString("Test");
+    a->sendPacket(pkt);
+
+    cores.streamB->updateData();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "String packet not received");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Hello, World!", received->readString().c_str(), "First string mismatch");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", received->readString().c_str(), "Empty string mismatch");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Test", received->readString().c_str(), "Third string mismatch");
+}
+
+void test_protobuf_serialization() {
+    auto cores = makeLinkedCores();
+    auto a = cores.coreA;
+    auto b = cores.coreB;
+
+    std::shared_ptr<SongbirdCore::Packet> received;
+    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
+        received = pkt;
+    });
+
+    // Simulate protobuf data (just raw bytes for testing)
+    std::vector<uint8_t> protoData1 = {0x08, 0x96, 0x01, 0x12, 0x04, 0x74, 0x65, 0x73, 0x74};
+    std::vector<uint8_t> protoData2 = {0x01, 0x02, 0x03};
+
+    auto pkt = a->createPacket(0x81);
+    pkt.writeProtobuf(protoData1);
+    pkt.writeProtobuf(protoData2);
+    a->sendPacket(pkt);
+
+    cores.streamB->updateData();
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(received.get(), "Protobuf packet not received");
+    
+    auto result1 = received->readProtobuf();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(protoData1.size(), result1.size(), "First protobuf size mismatch");
+    TEST_ASSERT_EQUAL_UINT8_ARRAY_MESSAGE(protoData1.data(), result1.data(), protoData1.size(), "First protobuf data mismatch");
+    
+    auto result2 = received->readProtobuf();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(protoData2.size(), result2.size(), "Second protobuf size mismatch");
+    TEST_ASSERT_EQUAL_UINT8_ARRAY_MESSAGE(protoData2.data(), result2.data(), protoData2.size(), "Second protobuf data mismatch");
+}
+
 void test_stream_mode_zero_bytes_in_payload() {
     auto s1 = std::make_shared<StreamMockStream>("A");
     auto s2 = std::make_shared<StreamMockStream>("B");
@@ -519,6 +575,8 @@ void setup() {
     RUN_TEST(test_float_payload);
     RUN_TEST(test_guaranteed_delivery_with_retransmit);
     RUN_TEST(test_repeat_blocking);
+    RUN_TEST(test_string_serialization);
+    RUN_TEST(test_protobuf_serialization);
     RUN_TEST(test_stream_mode_basic);
     RUN_TEST(test_stream_mode_multiple_packets);
     RUN_TEST(test_stream_mode_zero_bytes_in_payload);
