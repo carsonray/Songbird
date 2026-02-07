@@ -11,7 +11,7 @@ import sys
 from songbird import SongbirdUART
 
 
-SERIAL_PORT = "COM6"  # Change to your serial port
+SERIAL_PORT = "COM5"  # Change to your serial port
 SERIAL_BAUD_RATE = 115200
 
 

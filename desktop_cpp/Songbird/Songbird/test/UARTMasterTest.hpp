@@ -19,7 +19,7 @@
 #include "../src/SongbirdCore.h"
 #include "../src/SongbirdUART.h"
 
-#define SERIAL_PORT "\\\\.\\COM6"
+#define SERIAL_PORT "\\\\.\\COM5"
 #define SERIAL_BAUD_RATE 115200
 
 //Serial node object

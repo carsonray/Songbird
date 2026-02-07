@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Callable, Dict, List, Tuple
 from collections import deque
-import loggingimport cobs
+import logging
+from cobs import cobs
 from .istream import IStream
 
 
