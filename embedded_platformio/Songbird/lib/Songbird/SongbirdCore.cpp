@@ -16,39 +16,31 @@ std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mod
     
     if (reliableMode == SongbirdCore::RELIABLE) {
         // RELIABLE mode: no seq/guaranteed bytes
-        // STREAM: [header][length][payload]
+        // STREAM: [header][payload] (COBS encoded)
         // PACKET: [header][payload]
-        size_t headerSize = (mode == SongbirdCore::STREAM) ? 2 : 1;
-        out.reserve(headerSize + payloadLength);
+        out.reserve(1 + payloadLength);
         out.push_back(header);
-        if (mode == SongbirdCore::STREAM) {
-            // Length is needed for stream framing
-            out.push_back(static_cast<uint8_t>(payloadLength));
-        }
     } else {
         // UNRELIABLE mode: includes seq/guaranteed bytes
-        // STREAM: [header][length][seq][guaranteed][payload] = 4 + payload
-        // PACKET: [header][seq][guaranteed][payload] = 3 + payload
-        size_t headerSize = (mode == SongbirdCore::STREAM) ? 4 : 3;
-        out.reserve(headerSize + payloadLength);
+        // STREAM: [header][seq][guaranteed][payload] (COBS encoded)
+        // PACKET: [header][seq][guaranteed][payload]
+        out.reserve(3 + payloadLength);
         out.push_back(header);
-        if (mode == SongbirdCore::STREAM) {
-            // Length is needed for stream framing
-            out.push_back(static_cast<uint8_t>(payloadLength));
-            // Add sequence number for guaranteed delivery
-            out.push_back(sequenceNum);
-        } else if (mode == SongbirdCore::PACKET) {
-            // In packet mode, length is implicit but sequence number is needed to preserve ordering
-            out.push_back(sequenceNum);
-        }
-
-        // Add guaranteed flag byte (0 or 1)
+        out.push_back(sequenceNum);
         out.push_back(guaranteedFlag ? 1 : 0);
     }
     
     if (!payload.empty()) {
         out.insert(out.end(), payload.begin(), payload.end());
     }
+    
+    // Apply COBS encoding in STREAM mode
+    if (mode == SongbirdCore::STREAM) {
+        std::vector<uint8_t> encoded = SongbirdCore::cobsEncode(out.data(), out.size());
+        encoded.push_back(0x00);  // Add delimiter
+        return encoded;
+    }
+    
     return out;
 }
 
@@ -170,6 +162,56 @@ int16_t SongbirdCore::Packet::readInt16() {
     readBytes(buf, 2);
     int16_t val = static_cast<int16_t>(static_cast<uint16_t>(buf[1]) | (static_cast<uint16_t>(buf[0]) << 8));
     return val;
+}
+
+void SongbirdCore::Packet::writeString(const std::string& str) {
+    // Write length as uint16_t (big-endian)
+    uint16_t len = static_cast<uint16_t>(str.length());
+    writeByte(static_cast<uint8_t>((len >> 8) & 0xFF));
+    writeByte(static_cast<uint8_t>(len & 0xFF));
+    // Write string bytes
+    writeBytes(reinterpret_cast<const uint8_t*>(str.c_str()), str.length());
+}
+
+std::string SongbirdCore::Packet::readString() {
+    // Read length (uint16_t, big-endian)
+    uint8_t lenBuf[2];
+    readBytes(lenBuf, 2);
+    uint16_t len = (static_cast<uint16_t>(lenBuf[0]) << 8) | static_cast<uint16_t>(lenBuf[1]);
+    
+    // Read string bytes
+    if (len == 0) return std::string();
+    
+    std::vector<uint8_t> strBuf(len);
+    readBytes(strBuf.data(), len);
+    return std::string(strBuf.begin(), strBuf.end());
+}
+
+void SongbirdCore::Packet::writeProtobuf(const uint8_t* buffer, std::size_t length) {
+    // Write length as uint16_t (big-endian)
+    uint16_t len = static_cast<uint16_t>(length);
+    writeByte(static_cast<uint8_t>((len >> 8) & 0xFF));
+    writeByte(static_cast<uint8_t>(len & 0xFF));
+    // Write protobuf bytes
+    writeBytes(buffer, length);
+}
+
+void SongbirdCore::Packet::writeProtobuf(const std::vector<uint8_t>& data) {
+    writeProtobuf(data.data(), data.size());
+}
+
+std::vector<uint8_t> SongbirdCore::Packet::readProtobuf() {
+    // Read length (uint16_t, big-endian)
+    uint8_t lenBuf[2];
+    readBytes(lenBuf, 2);
+    uint16_t len = (static_cast<uint16_t>(lenBuf[0]) << 8) | static_cast<uint16_t>(lenBuf[1]);
+    
+    // Read protobuf bytes
+    if (len == 0) return std::vector<uint8_t>();
+    
+    std::vector<uint8_t> data(len);
+    readBytes(data.data(), len);
+    return data;
 }
 
 // SongbirdCore implementation
@@ -415,9 +457,9 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
     } else if (processMode == STREAM) {
         // Adds data to readBuffer
         appendToReadBuffer(data, length);
-        // Process complete or incomplete packets in readBuffer
+        // Process COBS-encoded packets in readBuffer
         while (true) {
-            std::shared_ptr<Packet> pkt = packetFromStream();
+            std::shared_ptr<Packet> pkt = packetFromStreamCOBS();
             if (!pkt) {
                 if (millis() - lastDataTimeMs > missingPacketTimeoutMs) {
                     // Timeout: clear read buffer to avoid stale data
@@ -475,52 +517,114 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t
     return pkt;
 }
 
-std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStream() {
+std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStreamCOBS() {
     SpinLockGuard guard(dataSpinlock);
     std::shared_ptr<SongbirdCore::Packet> pkt;
     
+    // Look for 0x00 delimiter
+    auto it = std::find(readBuffer.begin(), readBuffer.end(), 0x00);
+    if (it == readBuffer.end()) {
+        // No complete packet yet
+        return pkt;
+    }
+    
+    std::size_t delimiter_idx = std::distance(readBuffer.begin(), it);
+    
+    // Extract and decode COBS packet
+    if (delimiter_idx == 0) {
+        // Empty packet, skip delimiter
+        readBuffer.erase(readBuffer.begin());
+        return pkt;
+    }
+    
+    std::vector<uint8_t> decoded = cobsDecode(readBuffer.data(), delimiter_idx);
+    readBuffer.erase(readBuffer.begin(), readBuffer.begin() + delimiter_idx + 1); // Remove packet + delimiter
+    
+    if (decoded.empty()) {
+        return pkt;
+    }
+    
+    // Parse decoded packet
     if (reliableMode == RELIABLE) {
-        // RELIABLE mode: [header][length][payload]
-        if (newPacket) {
-            if (readBuffer.size() < 2) return pkt; // need at least header and length
-            newPacket = false;
-        }
-        // Do we have the full payload?
-        uint8_t currPayloadLen = readBuffer[1];
-        if (readBuffer.size() < 2 + static_cast<std::size_t>(currPayloadLen)) return pkt;
-        newPacket = true;
-        // we have a full packet in readBuffer; construct it
-        uint8_t currHeader = readBuffer[0];
+        // RELIABLE: [header][payload]
+        if (decoded.size() < 1) return pkt;
+        uint8_t currHeader = decoded[0];
         std::vector<uint8_t> payload;
-        payload.insert(payload.end(), readBuffer.begin() + 2, readBuffer.begin() + 2 + currPayloadLen);
+        if (decoded.size() > 1) {
+            payload.insert(payload.end(), decoded.begin() + 1, decoded.end());
+        }
         pkt = std::make_shared<Packet>(currHeader, payload);
-        // erase consumed bytes
-        readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 2 + currPayloadLen);
     } else {
-        // UNRELIABLE mode: [header][length][seq][guaranteed][payload]
-        if (newPacket) {
-            if (readBuffer.size() < 4) return pkt; // need at least header, len, seq, guaranteed flag
-            newPacket = false;
-        }
-        // Do we have the full payload?
-        uint8_t currPayloadLen = readBuffer[1];
-        if (readBuffer.size() < 4 + static_cast<std::size_t>(currPayloadLen)) return pkt;
-        newPacket = true;
-        // we have a full packet in readBuffer; construct it
-        uint8_t currHeader = readBuffer[0];
-        uint8_t currSeqNum = readBuffer[2];
-        uint8_t guaranteed = readBuffer[3];
-
+        // UNRELIABLE: [header][seq][guaranteed][payload]
+        if (decoded.size() < 3) return pkt;
+        uint8_t currHeader = decoded[0];
+        uint8_t currSeqNum = decoded[1];
+        uint8_t guaranteed = decoded[2];
         std::vector<uint8_t> payload;
-        payload.insert(payload.end(), readBuffer.begin() + 4, readBuffer.begin() + 4 + currPayloadLen);
+        if (decoded.size() > 3) {
+            payload.insert(payload.end(), decoded.begin() + 3, decoded.end());
+        }
         pkt = std::make_shared<Packet>(currHeader, payload);
         pkt->setSequenceNum(currSeqNum);
         if (guaranteed) pkt->setGuaranteed();
-
-        // erase consumed bytes
-        readBuffer.erase(readBuffer.begin(), readBuffer.begin() + 4 + currPayloadLen);
     }
+    
     return pkt;
+}
+
+std::vector<uint8_t> SongbirdCore::cobsEncode(const uint8_t* data, std::size_t length) {
+    if (length == 0) return std::vector<uint8_t>();
+    
+    std::vector<uint8_t> encoded;
+    encoded.reserve(length + (length / 254) + 1);
+    
+    std::size_t code_idx = 0;
+    uint8_t code = 0x01;
+    
+    encoded.push_back(0); // Placeholder for first code
+    
+    for (std::size_t i = 0; i < length; i++) {
+        if (data[i] == 0x00) {
+            encoded[code_idx] = code;
+            code_idx = encoded.size();
+            encoded.push_back(0); // Placeholder for next code
+            code = 0x01;
+        } else {
+            encoded.push_back(data[i]);
+            code++;
+            if (code == 0xFF) {
+                encoded[code_idx] = code;
+                code_idx = encoded.size();
+                encoded.push_back(0); // Placeholder for next code
+                code = 0x01;
+            }
+        }
+    }
+    
+    encoded[code_idx] = code;
+    return encoded;
+}
+
+std::vector<uint8_t> SongbirdCore::cobsDecode(const uint8_t* data, std::size_t length) {
+    if (length == 0) return std::vector<uint8_t>();
+    
+    std::vector<uint8_t> decoded;
+    decoded.reserve(length);
+    
+    std::size_t i = 0;
+    while (i < length) {
+        uint8_t code = data[i++];
+        
+        for (uint8_t j = 1; j < code && i < length; j++) {
+            decoded.push_back(data[i++]);
+        }
+        
+        if (code < 0xFF && i < length) {
+            decoded.push_back(0x00);
+        }
+    }
+    
+    return decoded;
 }
 
 void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {

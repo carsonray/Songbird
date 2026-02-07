@@ -148,11 +148,40 @@ static bool run_float_payload() {
   return true;
 }
 
+static bool run_string_payload() {
+  auto request = core->waitForHeader(0x32, 2000);
+  if (!request) return false;
+  if (request->getHeader() != 0x32) return false;
+  std::string str1 = request->readString();
+  std::string str2 = request->readString();
+  if (str1 != "Hello, Songbird!" || str2 != "Test String 123") return false;
+  auto resp = core->createPacket(0x32);
+  resp.writeString("Hello, Songbird!");
+  resp.writeString("Test String 123");
+  core->sendPacket(resp);
+  return true;
+}
+
+static bool run_protobuf_payload() {
+  auto request = core->waitForHeader(0x33, 2000);
+  if (!request) return false;
+  if (request->getHeader() != 0x33) return false;
+  std::vector<uint8_t> proto1 = request->readProtobuf();
+  std::vector<uint8_t> proto2 = request->readProtobuf();
+  if (proto1.size() != 3 || proto1[0] != 0xAA || proto1[1] != 0xBB || proto1[2] != 0xCC) return false;
+  if (proto2.size() != 4 || proto2[0] != 0x01 || proto2[1] != 0x02 || proto2[2] != 0x03 || proto2[3] != 0x04) return false;
+  auto resp = core->createPacket(0x33);
+  resp.writeProtobuf(proto1);
+  resp.writeProtobuf(proto2);
+  core->sendPacket(resp);
+  return true;
+}
+
 void testsTask(void* pvParameters) {
   waitForPing();
 
   bool pass = true;
-  uint8_t firstFailedTest = 0; // 0 = all pass, 1-5 = test number that failed
+  uint8_t firstFailedTest = 0; // 0 = all pass, 1-7 = test number that failed
 
   if (!run_basic_send_receive()) { if (firstFailedTest == 0) firstFailedTest = 1; pass = false; }
 
@@ -171,6 +200,14 @@ void testsTask(void* pvParameters) {
   vTaskDelay(pdMS_TO_TICKS(200));
   
   if (!run_float_payload()) { if (firstFailedTest == 0) firstFailedTest = 5; pass = false; }
+
+  vTaskDelay(pdMS_TO_TICKS(200));
+  
+  if (!run_string_payload()) { if (firstFailedTest == 0) firstFailedTest = 6; pass = false; }
+
+  vTaskDelay(pdMS_TO_TICKS(200));
+  
+  if (!run_protobuf_payload()) { if (firstFailedTest == 0) firstFailedTest = 7; pass = false; }
 
   auto pkt = core->createPacket(0xFE);
   pkt.writeByte(pass ? 0x01 : 0x00);

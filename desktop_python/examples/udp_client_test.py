@@ -177,6 +177,67 @@ def run_guaranteed_delivery(core):
     return ok
 
 
+def run_string_payload(core):
+    """Test string payload transmission."""
+    print("Test 6: String payload... ", end="", flush=True)
+    
+    req = core.create_packet(0x32)
+    req.write_string("Hello, Songbird!")
+    req.write_string("Test String 123")
+    core.send_packet(req)
+    
+    resp = core.wait_for_header(0x32, 2000)
+    
+    if not resp:
+        print("FAILED (no response)")
+        return False
+    if resp.get_header() != 0x32:
+        print("FAILED (header mismatch)")
+        return False
+    
+    str1 = resp.read_string()
+    str2 = resp.read_string()
+    
+    if str1 == "Hello, Songbird!" and str2 == "Test String 123":
+        print("PASSED")
+        return True
+    else:
+        print(f"FAILED (values: '{str1}', '{str2}')")
+        return False
+
+
+def run_protobuf_payload(core):
+    """Test protobuf payload transmission."""
+    print("Test 7: Protobuf payload... ", end="", flush=True)
+    
+    proto1 = bytes([0xAA, 0xBB, 0xCC])
+    proto2 = bytes([0x01, 0x02, 0x03, 0x04])
+    
+    req = core.create_packet(0x33)
+    req.write_protobuf(proto1)
+    req.write_protobuf(proto2)
+    core.send_packet(req)
+    
+    resp = core.wait_for_header(0x33, 2000)
+    
+    if not resp:
+        print("FAILED (no response)")
+        return False
+    if resp.get_header() != 0x33:
+        print("FAILED (header mismatch)")
+        return False
+    
+    recv_proto1 = resp.read_protobuf()
+    recv_proto2 = resp.read_protobuf()
+    
+    if recv_proto1 == proto1 and recv_proto2 == proto2:
+        print("PASSED")
+        return True
+    else:
+        print("FAILED (protobuf mismatch)")
+        return False
+
+
 def main():
     """Main test runner."""
     print("=== Songbird UDP Client Test ===")
@@ -208,6 +269,8 @@ def main():
             run_request_response,
             run_remote_response,
             run_guaranteed_delivery,
+            run_string_payload,
+            run_protobuf_payload,
         ]
         
         results = []
