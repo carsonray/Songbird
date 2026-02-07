@@ -143,6 +143,47 @@ def run_float_payload(core):
     return abs(v - 3.14159) < 0.0002
 
 
+def run_string_payload(core):
+    """Test string payload transmission."""
+    req = core.create_packet(0x32)
+    req.write_string("Hello, Songbird!")
+    req.write_string("Test String 123")
+    core.send_packet(req)
+    
+    resp = core.wait_for_header(0x32, 2000)
+    
+    if not resp:
+        return False
+    if resp.get_header() != 0x32:
+        return False
+    
+    str1 = resp.read_string()
+    str2 = resp.read_string()
+    return str1 == "Hello, Songbird!" and str2 == "Test String 123"
+
+
+def run_protobuf_payload(core):
+    """Test protobuf payload transmission."""
+    proto1 = bytes([0xAA, 0xBB, 0xCC])
+    proto2 = bytes([0x01, 0x02, 0x03, 0x04])
+    
+    req = core.create_packet(0x33)
+    req.write_protobuf(proto1)
+    req.write_protobuf(proto2)
+    core.send_packet(req)
+    
+    resp = core.wait_for_header(0x33, 2000)
+    
+    if not resp:
+        return False
+    if resp.get_header() != 0x33:
+        return False
+    
+    recv_proto1 = resp.read_protobuf()
+    recv_proto2 = resp.read_protobuf()
+    return recv_proto1 == proto1 and recv_proto2 == proto2
+
+
 def main():
     """Main test runner."""
     try:
@@ -207,6 +248,24 @@ def main():
         print("\nfloat_payload: FAIL")
         pass_overall = False
     
+    time.sleep(0.2)
+    
+    print("\nRunning string payload test...")
+    if run_string_payload(core):
+        print("\nstring_payload: PASS")
+    else:
+        print("\nstring_payload: FAIL")
+        pass_overall = False
+    
+    time.sleep(0.2)
+    
+    print("\nRunning protobuf payload test...")
+    if run_protobuf_payload(core):
+        print("\nprotobuf_payload: PASS")
+    else:
+        print("\nprotobuf_payload: FAIL")
+        pass_overall = False
+    
     print(f"\nOverall: {'PASS' if pass_overall else 'FAIL'}")
     
     # Wait for embedded test results
@@ -226,7 +285,7 @@ def main():
     print(f"\nEmbedded test results: {'PASS' if embedded_pass else 'FAIL'}", end="")
     if not embedded_pass and first_failed_test > 0:
         test_names = ["", "basic_send_receive", "specific_handler", "request_response", 
-                      "integer_payload", "float_payload"]
+                      "integer_payload", "float_payload", "string_payload", "protobuf_payload"]
         print(f" (First failed test: {test_names[first_failed_test]})", end="")
     print()
     

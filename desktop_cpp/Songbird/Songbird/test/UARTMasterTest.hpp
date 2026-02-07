@@ -134,6 +134,36 @@ static bool run_float_payload() {
     return true;
 }
 
+static bool run_string_payload() {
+    auto req = core->createPacket(0x32);
+    req.writeString("Hello, Songbird!");
+    req.writeString("Test String 123");
+    core->sendPacket(req);
+    auto resp = core->waitForHeader(0x32, 2000);
+    if (!resp) return false;
+    if (resp->getHeader() != 0x32) return false;
+    std::string str1 = resp->readString();
+    std::string str2 = resp->readString();
+    if (str1 != "Hello, Songbird!" || str2 != "Test String 123") return false;
+    return true;
+}
+
+static bool run_protobuf_payload() {
+    std::vector<uint8_t> proto1 = {0xAA, 0xBB, 0xCC};
+    std::vector<uint8_t> proto2 = {0x01, 0x02, 0x03, 0x04};
+    auto req = core->createPacket(0x33);
+    req.writeProtobuf(proto1);
+    req.writeProtobuf(proto2);
+    core->sendPacket(req);
+    auto resp = core->waitForHeader(0x33, 2000);
+    if (!resp) return false;
+    if (resp->getHeader() != 0x33) return false;
+    std::vector<uint8_t> recvProto1 = resp->readProtobuf();
+    std::vector<uint8_t> recvProto2 = resp->readProtobuf();
+    if (recvProto1 != proto1 || recvProto2 != proto2) return false;
+    return true;
+}
+
 int main() {
     // Gets data protocol
     core = uart.getProtocol();
@@ -168,6 +198,16 @@ int main() {
     std::cout << "\nRunning float payload test...\n";
     if (run_float_payload()) std::cout << "\nfloat_payload: PASS\n"; else { std::cout << "\nfloat_payload: FAIL\n"; pass = false; }
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    std::cout << "\nRunning string payload test...\n";
+    if (run_string_payload()) std::cout << "\nstring_payload: PASS\n"; else { std::cout << "\nstring_payload: FAIL\n"; pass = false; }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    std::cout << "\nRunning protobuf payload test...\n";
+    if (run_protobuf_payload()) std::cout << "\nprotobuf_payload: PASS\n"; else { std::cout << "\nprotobuf_payload: FAIL\n"; pass = false; }
+
     std::cout << "\nOverall: " << (pass ? "PASS" : "FAIL") << "\n";
 
     auto embeddedResult = core->waitForHeader(0xFE, 2000);
@@ -188,7 +228,7 @@ int main() {
 
     std::cout << "\nEmbedded test results: " << (embeddedPass ? "PASS" : "FAIL");
     if (!embeddedPass && firstFailedTest > 0) {
-        const char* testNames[] = { "", "basic_send_receive", "specific_handler", "request_response", "integer_payload", "float_payload" };
+        const char* testNames[] = { "", "basic_send_receive", "specific_handler", "request_response", "integer_payload", "float_payload", "string_payload", "protobuf_payload" };
         std::cout << " (First failed test: " << testNames[firstFailedTest] << ")";
     }
     std::cout << "\n";

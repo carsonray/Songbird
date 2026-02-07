@@ -223,6 +223,73 @@ static bool run_float_payload() {
   return true;
 }
 
+static bool run_string_payload() {
+  Serial.println("Test: string payload");
+  auto request = core->waitForHeader(0x32, 2000);
+  if (!request) {
+    Serial.println("  string_payload: FAIL (no request)");
+    return false;
+  }
+  if (request->getHeader() != 0x32) {
+    Serial.println("  string_payload: FAIL (header mismatch)");
+    return false;
+  }
+  
+  String str1 = request->readString();
+  String str2 = request->readString();
+  
+  if (str1 != "Hello, Songbird!" || str2 != "Test String 123") {
+    Serial.print("  string_payload: FAIL (values: '");
+    Serial.print(str1);
+    Serial.print("', '");
+    Serial.print(str2);
+    Serial.println("')");
+    return false;
+  }
+  
+  auto resp = core->createPacket(0x32);
+  resp.writeString("Hello, Songbird!");
+  resp.writeString("Test String 123");
+  core->sendPacket(resp);
+  Serial.println("  string_payload: PASS");
+  return true;
+}
+
+static bool run_protobuf_payload() {
+  Serial.println("Test: protobuf payload");
+  auto request = core->waitForHeader(0x33, 2000);
+  if (!request) {
+    Serial.println("  protobuf_payload: FAIL (no request)");
+    return false;
+  }
+  if (request->getHeader() != 0x33) {
+    Serial.println("  protobuf_payload: FAIL (header mismatch)");
+    return false;
+  }
+  
+  std::vector<uint8_t> proto1 = request->readProtobuf();
+  std::vector<uint8_t> proto2 = request->readProtobuf();
+  
+  // Validate first protobuf: {0xAA, 0xBB, 0xCC}
+  if (proto1.size() != 3 || proto1[0] != 0xAA || proto1[1] != 0xBB || proto1[2] != 0xCC) {
+    Serial.println("  protobuf_payload: FAIL (proto1 mismatch)");
+    return false;
+  }
+  
+  // Validate second protobuf: {0x01, 0x02, 0x03, 0x04}
+  if (proto2.size() != 4 || proto2[0] != 0x01 || proto2[1] != 0x02 || proto2[2] != 0x03 || proto2[3] != 0x04) {
+    Serial.println("  protobuf_payload: FAIL (proto2 mismatch)");
+    return false;
+  }
+  
+  auto resp = core->createPacket(0x33);
+  resp.writeProtobuf(proto1);
+  resp.writeProtobuf(proto2);
+  core->sendPacket(resp);
+  Serial.println("  protobuf_payload: PASS");
+  return true;
+}
+
 void testsTask(void* pvParameters) {
   waitForPing();
 
@@ -265,6 +332,22 @@ void testsTask(void* pvParameters) {
   r = run_float_payload();
   pass &= r;
   Serial.print("Result - float_payload: ");
+  Serial.println(r ? "PASS" : "FAIL");
+
+  vTaskDelay(pdMS_TO_TICKS(200));
+  
+
+  r = run_string_payload();
+  pass &= r;
+  Serial.print("Result - string_payload: ");
+  Serial.println(r ? "PASS" : "FAIL");
+
+  vTaskDelay(pdMS_TO_TICKS(200));
+  
+
+  r = run_protobuf_payload();
+  pass &= r;
+  Serial.print("Result - protobuf_payload: ");
   Serial.println(r ? "PASS" : "FAIL");
 
 
