@@ -24,6 +24,9 @@ void SongbirdUART::updateData() {
                 protocol->parseData(buffer.data(), bytesRead);
             }
     }
+    
+    // Update protocol timers (check for timeouts)
+    protocol->update();
 }
 
 void SongbirdUART::close() {

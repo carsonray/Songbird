@@ -17,6 +17,11 @@ SongbirdUDP::~SongbirdUDP() {
     close();
 }
 
+void SongbirdUDP::update() {
+    // Update protocol timers (check for timeouts)
+    protocol->update();
+}
+
 bool SongbirdUDP::listen(uint16_t port) {
     multicastMode = false;
     opened = true;

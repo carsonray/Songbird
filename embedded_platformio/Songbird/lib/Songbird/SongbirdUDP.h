@@ -15,6 +15,9 @@ public:
 
     // Start listen handler
     void begin();
+    
+    // Update protocol timers (call regularly in main loop)
+    void update();
 
     // Sets local port to listen at
     bool listen(uint16_t port);
