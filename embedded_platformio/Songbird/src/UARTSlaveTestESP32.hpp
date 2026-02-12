@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <memory>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "SongbirdCore.h"
 #include "SongbirdUART.h"
 

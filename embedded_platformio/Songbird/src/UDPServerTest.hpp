@@ -1,3 +1,6 @@
+// UDPServerTest is only available on ESP32
+#if defined(ESP32)
+
 #include <Arduino.h>
 #include <memory>
 #include "SongbirdCore.h"
@@ -365,3 +368,5 @@ void testsTask(void* pvParameters) {
 void loop() {
   // Nothing to do here, all work is in RTOS tasks
 }
+
+#endif // ESP32

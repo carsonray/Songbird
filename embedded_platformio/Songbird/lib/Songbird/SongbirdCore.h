@@ -7,7 +7,6 @@
 #include <unordered_map>
 #include <queue>
 #include <functional>
-#include <atomic>
 #include <memory>
 
 #include <Arduino.h>
@@ -72,6 +71,10 @@ class SongbirdCore {
 
             bool operator==(const Remote& o) const {
                 return ip == o.ip && port == o.port;
+            }
+            
+            bool operator!=(const Remote& o) const {
+                return !(*this == o);
             }
         };
 
@@ -276,7 +279,7 @@ class SongbirdCore {
         std::unordered_map<RemoteExpected, std::shared_ptr<SongbirdCore::Packet>, RemoteExpectedHasher> incomingPackets;
 
         // Outgoing packet sequence numbers
-        std::atomic<uint8_t> nextSeqNum;
+        uint8_t nextSeqNum;
 
         // Expected incoming packet sequence numbers by remotes
         std::unordered_map<Remote, RemoteOrder, RemoteHasher> remoteOrders;

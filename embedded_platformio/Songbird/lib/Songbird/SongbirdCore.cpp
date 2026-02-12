@@ -364,7 +364,8 @@ void SongbirdCore::setAllowOutofOrder(bool allow) {
 }
 
 void SongbirdCore::sendPacket(Packet& packet, bool guaranteeDelivery) {
-    sendPacket(packet, nextSeqNum.fetch_add(1), guaranteeDelivery);
+    uint8_t seqNum = nextSeqNum++;
+    sendPacket(packet, seqNum, guaranteeDelivery);
 }
 void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guaranteeDelivery) {
     if (!stream || !stream->isOpen()) {
@@ -403,7 +404,6 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guarante
                 packet.setRemote(remote);
             }
         }
-        RemoteExpected remoteExpected{remote, sequenceNum};
         OutgoingInfo info{std::make_shared<Packet>(packet), remote, micros(), 0};
         {
             SpinLockGuard guard(dataSpinlock);
@@ -766,56 +766,6 @@ void SongbirdCore::onMissingTimeout(const Remote remote) {
     auto reordered = reorderPackets();
     for (auto& pkt : reordered) {
         callHandlers(pkt);
-    }
-}
-                bestDist = dist;
-                bestSeq = seq;
-            }
-        }
-
-        if (found)
-        {
-            order.expectedSeqNum = bestSeq;
-            order.missingTimerActive = false;
-            needsReorder = true;
-        } else {
-            // No packets for this remote — delete it safely
-            // Mark timer for deletion outside the lock
-            if (order.missingTimer) {
-                timerToDelete = order.missingTimer;
-            }
-            remoteOrders.erase(it);
-            remoteMap.erase(remote);
-        }
-    }
-    
-    // Handle reordering outside the spinlock
-    if (needsReorder) {
-        SpinLockGuard guard(dataSpinlock);
-        auto it = remoteOrders.find(remote);
-        if (it != remoteOrders.end()) {
-            dispatch = reorderRemote(remote, it->second, timersToStop);
-        }
-    }
-    
-    // Stop/delete timers OUTSIDE the spinlock
-    for (auto timer : timersToStop) {
-        if (timer) {
-            xTimerStop(timer, 0);
-        }
-    }
-    
-    if (timerToDelete) {
-        xTimerStop(timerToDelete, 0);
-        // Free the TimeoutID allocated when timer was created
-        auto *id = static_cast<TimeoutID*>(pvTimerGetTimerID(timerToDelete));
-        vPortFree(id);
-        xTimerDelete(timerToDelete, 0);
-    }
-
-    // Call handlers on dispatched packets
-    for (auto& p : dispatch) {
-        callHandlers(p);
     }
 }
 

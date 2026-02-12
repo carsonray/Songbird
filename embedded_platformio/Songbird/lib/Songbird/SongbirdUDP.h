@@ -1,6 +1,9 @@
 #ifndef UDPSTREAM_H
 #define UDPSTREAM_H
 
+// SongbirdUDP is only available on ESP32 (requires AsyncUdp library)
+#if defined(ESP32)
+
 #include <Arduino.h>
 #include <memory>
 #include <string>
@@ -58,5 +61,7 @@ private:
     uint16_t remotePort;
     uint16_t localPort;
 };
+
+#endif // ESP32
 
 #endif // UDPSTREAM_H

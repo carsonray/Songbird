@@ -1,4 +1,8 @@
 #include "SongbirdUDP.h"
+
+// SongbirdUDP is only available on ESP32
+#if defined(ESP32)
+
 #include <cstring>
 
 SongbirdUDP::SongbirdUDP(std::string name)
@@ -115,3 +119,5 @@ void SongbirdUDP::close() {
         opened = false;
     }
 }
+
+#endif // ESP32
