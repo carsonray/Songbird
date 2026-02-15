@@ -17,7 +17,7 @@ SongbirdUART::~SongbirdUART() {
     close();
 }
 
-bool SongbirdUART::begin(const std::string& port, unsigned int baudRate) {
+bool SongbirdUART::begin(const std::string& port, unsigned int baudRate, bool silent) {
     try {
         serialPort->open(port);
         serialPort->set_option(boost::asio::serial_port_base::baud_rate(baudRate));
@@ -38,7 +38,9 @@ bool SongbirdUART::begin(const std::string& port, unsigned int baudRate) {
         return true;
     }
     catch (boost::system::system_error& e) {
-        std::cerr << "Error opening serial port: " << e.what() << std::endl;
+        if (!silent) {
+            std::cerr << "Error opening serial port: " << e.what() << std::endl;
+        }
         return false;
     }
 }

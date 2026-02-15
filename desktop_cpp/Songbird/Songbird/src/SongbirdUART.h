@@ -15,7 +15,7 @@ public:
     ~SongbirdUART();
 
     // Initialize and open the serial port
-    bool begin(const std::string& port, unsigned int baudRate);
+    bool begin(const std::string& port, unsigned int baudRate, bool silent = false);
 
 	// Write data to the serial port
     void write(const uint8_t* buffer, std::size_t length) override;
