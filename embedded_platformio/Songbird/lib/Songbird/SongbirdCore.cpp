@@ -221,7 +221,8 @@ SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, Son
 {
     // Initialize spinlock based on platform
     #if defined(ESP32)
-        dataSpinlock = portMUX_INITIALIZER_UNLOCKED;
+        // Create FreeRTOS mutex semaphore
+        dataSpinlock = xSemaphoreCreateMutex();
     #elif defined(PICO_SDK)
         critical_section_init(&dataSpinlock);
     #else
@@ -233,7 +234,9 @@ SongbirdCore::~SongbirdCore() {
     flush();
     
     // Cleanup spinlock based on platform
-    #if defined(PICO_SDK)
+    #if defined(ESP32)
+        if (dataSpinlock) vSemaphoreDelete(dataSpinlock);
+    #elif defined(PICO_SDK)
         critical_section_deinit(&dataSpinlock);
     #endif
 }
@@ -290,6 +293,9 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
 
     unsigned long start = millis();
     while ((millis() - start) < timeoutMs) {
+        // Poll for new data
+        if (stream) stream->updateData();
+        
         {
             SpinLockGuard guard(dataSpinlock);
             auto it = headerMap.find(header);
@@ -319,6 +325,9 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForRemote(IPAddress remo
 
     unsigned long start = millis();
     while ((millis() - start) < timeoutMs) {
+        // Poll for new data
+        if (stream) stream->updateData();
+        
         {
             SpinLockGuard guard(dataSpinlock);
             auto it = remoteMap.find(remote);

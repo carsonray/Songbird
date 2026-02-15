@@ -46,6 +46,7 @@ public:
     void write(const uint8_t* buffer, std::size_t length) override;
     bool isOpen() const override;
     void close() override;
+    void updateData() override { update(); }
     bool supportsRemoteWrite() const override;
     void writeToRemote(const uint8_t* buffer, std::size_t length, const IPAddress& ip, uint16_t port) override;
     bool getDefaultRemote(IPAddress& outIP, uint16_t& outPort) override;

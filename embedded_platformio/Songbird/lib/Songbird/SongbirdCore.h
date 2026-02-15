@@ -15,18 +15,21 @@
 
 // Conditional spinlock implementation based on platform
 #if defined(ESP32)
-    // ESP32 FreeRTOS spinlock
+    // ESP32 FreeRTOS mutex semaphore
     #include "freertos/FreeRTOS.h"
-    #include "freertos/portmacro.h"
+    #include "freertos/semphr.h"
     
     struct SpinLockGuard {
-        portMUX_TYPE* mux;
-        explicit SpinLockGuard(portMUX_TYPE& m) : mux(&m) { portENTER_CRITICAL(mux); }
-        ~SpinLockGuard() { portEXIT_CRITICAL(mux); }
+        SemaphoreHandle_t mutex;
+        explicit SpinLockGuard(SemaphoreHandle_t m) : mutex(m) { 
+            if (mutex) xSemaphoreTake(mutex, portMAX_DELAY); 
+        }
+        ~SpinLockGuard() { 
+            if (mutex) xSemaphoreGive(mutex); 
+        }
     };
     
-    typedef portMUX_TYPE SpinLock_t;
-    #define SPINLOCK_INITIALIZER portMUX_INITIALIZER_UNLOCKED
+    typedef SemaphoreHandle_t SpinLock_t;
     
 #elif defined(PICO_SDK)
     // Raspberry Pi Pico SDK spinlock

@@ -11,6 +11,9 @@ class IStream {
         virtual bool isOpen() const;
         virtual void close();
         
+        // Update/poll for new data (if applicable)
+        virtual void updateData() {}
+        
         // Returns true if this stream supports dynamic remote addressing
         virtual bool supportsRemoteWrite() const { return false; }
         

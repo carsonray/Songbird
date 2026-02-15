@@ -15,7 +15,7 @@ public:
     // Initialize and open the serial port
     bool begin(unsigned int baudRate);
 
-    void updateData();
+    void updateData() override;
 
     // Close the serial port
     void close() override;
