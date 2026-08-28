@@ -198,9 +198,6 @@ pkt = core.wait_for_remote("192.168.1.100", 8080, timeout_ms=1000)
 core.set_missing_packet_timeout(100)  # milliseconds
 core.set_retransmission_timeout(1000)  # milliseconds
 core.set_max_retransmit_attempts(5)  # 0 = infinite
-
-# Allow out-of-order packets (lower latency)
-core.set_allow_out_of_order(True)
 ```
 
 ## Examples

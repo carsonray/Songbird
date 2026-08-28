@@ -232,38 +232,20 @@ std::vector<uint8_t> SongbirdCore::Packet::readProtobuf() {
 SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode)
     : self(this), name(std::move(name)), processMode(mode), reliableMode(reliableMode), nextSeqNum(0), missingPacketTimeoutMs(100), retransmissionTimeoutMs(1000), maxRetransmitAttempts(5)
 {
-    // Start missing-packet monitor thread for desktop (also handles retransmission)
+    // Start retransmission monitor thread for desktop.
     missingTimerThreadStop.store(false);
     missingTimerThread = std::thread([this]() {
         using namespace std::chrono;
         while (!missingTimerThreadStop.load()) {
-            // Sleep for a short interval, or until signalled
             std::unique_lock<std::mutex> lk(missingTimerMutex);
-            missingTimerCv.wait_for(lk, std::chrono::milliseconds(std::min(missingPacketTimeoutMs, retransmissionTimeoutMs)), 
+            missingTimerCv.wait_for(lk, std::chrono::milliseconds(std::min(missingPacketTimeoutMs, retransmissionTimeoutMs)),
                 [this]() { return missingTimerThreadStop.load(); });
             if (missingTimerThreadStop.load()) break;
 
-            // Collect remotes whose missing timer expired
-            std::vector<Remote> expiredRemotes;
-            // Collect packets that need retransmission
-            std::vector<uint8_t> retransmitPackets;
-            
             auto now = steady_clock::now();
+            std::vector<uint8_t> retransmitPackets;
             {
                 std::lock_guard<std::mutex> lock(dataMutex);
-                // Check missing packet timeouts
-                for (auto& it : remoteOrders) {
-                    const Remote& r = it.first;
-                    RemoteOrder& order = it.second;
-                    if (order.missingTimerActive && order.missingTimerStart != std::chrono::steady_clock::time_point::min()) {
-                        auto elapsed = duration_cast<milliseconds>(now - order.missingTimerStart).count();
-                        if (static_cast<uint32_t>(elapsed) >= missingPacketTimeoutMs) {
-                            expiredRemotes.push_back(r);
-                        }
-                    }
-                }
-
-                // Check guaranteed delivery retransmission timeouts
                 for (auto& it : outgoingGuaranteed) {
                     uint8_t seqNum = it.first;
                     OutgoingInfo& gp = it.second;
@@ -274,14 +256,8 @@ SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, Son
                 }
             }
 
-            // Call onMissingTimeout for each expired remote outside the data lock
-            for (const auto& r : expiredRemotes) {
-                onMissingTimeout(r);
-            }
-
-            // Retransmit guaranteed packets
             for (auto& seqNum : retransmitPackets) {
-				onRetransmissionTimeout(seqNum);
+                onRetransmissionTimeout(seqNum);
             }
         }
     });
@@ -442,11 +418,6 @@ void SongbirdCore::setMaxRetransmitAttempts(uint32_t attempts) {
     maxRetransmitAttempts = attempts;
 }
 
-void SongbirdCore::setAllowOutofOrder(bool allow) {
-    if (allowOutofOrder == allow) return;
-    allowOutofOrder = allow;
-}
-
 void SongbirdCore::sendPacket(Packet& packet, bool guaranteeDelivery) {
     sendPacket(packet, nextSeqNum.fetch_add(1), guaranteeDelivery);
 }
@@ -518,34 +489,9 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, boost::asi
             return; // Was an ACK packet, already handled
         }
 
-        std::vector<std::shared_ptr<Packet>> dispatch;
-        if (allowOutofOrder || reliableMode == RELIABLE) {
-            dispatch.push_back(pkt);
-            if (reliableMode == UNRELIABLE) {
-                if (pkt->isGuaranteed()) {
-                    // Update remoteOrders even in out-of-order mode for repeat detection (UNRELIABLE mode only)
-                    updateRemoteOrder(pkt);
-                }
-				std::lock_guard<std::mutex> lock(dataMutex);
-                // If any remaining packets in incoming packets add to dispatch
-                for (const auto& p : incomingPackets) {
-                    dispatch.push_back(p.second);
-                }
-                incomingPackets.clear();
-            }
-        }
-        else if (reliableMode == UNRELIABLE) {
-            // If it is a new remote and ordering mode is on, add to remote order map
+        std::vector<std::shared_ptr<Packet>> dispatch{ pkt };
+        if (reliableMode == UNRELIABLE && pkt->isGuaranteed()) {
             updateRemoteOrder(pkt);
-
-            {
-				std::lock_guard<std::mutex> lock(dataMutex);
-
-                const RemoteExpected expected{ pkt->getRemote(), pkt->getSequenceNum() };
-                incomingPackets[expected] = pkt;
-            }
-
-            dispatch = reorderPackets();
         }
 
         // Call handlers on dispatched packets
@@ -779,108 +725,6 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
     if (globalHandler) globalHandler(pkt);
 }
 
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets()
-{
-    std::lock_guard<std::mutex> lock(dataMutex);
-    std::vector<std::shared_ptr<Packet>> dispatch;
-
-    // Iterating through remotes
-    for (auto itOrder = remoteOrders.begin(); itOrder != remoteOrders.end(); ++itOrder)
-    {
-        Remote r = itOrder->first;
-        RemoteOrder& order = itOrder->second;
-
-        auto remotePackets = reorderRemote(r, order);
-        dispatch.insert(dispatch.end(), remotePackets.begin(), remotePackets.end());
-    }
-
-    return dispatch;
-}
-
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(const SongbirdCore::Remote r, SongbirdCore::RemoteOrder& order) {
-    std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatch;
-    while (true)
-    {
-        const RemoteExpected key{ r, order.expectedSeqNum };
-        auto itPkt = incomingPackets.find(key);
-
-        // Checks for packet with correct sequence number
-        if (itPkt != incomingPackets.end())
-        {
-            dispatch.push_back(itPkt->second);
-            incomingPackets.erase(itPkt);
-            order.expectedSeqNum++;
-            if (order.missingTimerActive) {
-                // Cancel desktop timer
-                order.missingTimerActive = false;
-                order.missingTimerStart = std::chrono::steady_clock::time_point::min();
-            }
-            continue;
-        }
-
-        // No packets with correct sequence, starting timeout
-        if (!order.missingTimerActive)
-        {
-            order.missingTimerActive = true;
-            order.missingTimerStart = std::chrono::steady_clock::now();
-            // Notify timer thread to re-evaluate
-            missingTimerCv.notify_all();
-            break;
-        }
-
-        break;
-    }
-    return dispatch;
-}
-
-void SongbirdCore::onMissingTimeout(const Remote remote) {
-    std::vector<std::shared_ptr<Packet>> dispatch;
-    {
-        std::lock_guard<std::mutex> lock(dataMutex);
-        // Timeout: find nearest forward seqNum for this remote
-        bool found = false;
-        uint8_t bestDist = 0xFF;
-        uint8_t bestSeq = 0;
-
-        // Finds remote order from map
-        auto it = remoteOrders.find(remote);
-        if (it == remoteOrders.end()) return;
-        RemoteOrder& order = it->second;
-
-        for (auto& p : incomingPackets)
-        {
-            if (!(p.first.remote == remote)) continue;
-
-            uint8_t seq = p.first.seqNum;
-            uint8_t dist = uint8_t(seq - order.expectedSeqNum);
-
-            if (!found || dist < bestDist)
-            {
-                found = true;
-                bestDist = dist;
-                bestSeq = seq;
-            }
-        }
-
-        if (found)
-        {
-            order.expectedSeqNum = bestSeq;
-            order.missingTimerActive = false;
-            dispatch = reorderRemote(remote, order);
-        }
-        else {
-            // No packets for this remote, delete it safely
-            remoteOrders.erase(it);
-            remoteMap.erase(remote);
-        }
-    }
-
-    // Call handlers on dispatched packets
-    for (auto& p : dispatch) {
-        callHandlers(p);
-    }
-}
-
 void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
     std::lock_guard<std::mutex> lock(dataMutex);
     Remote remote = pkt->getRemote();
@@ -888,35 +732,12 @@ void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
 
     auto it = remoteOrders.find(remote);
     if (it == remoteOrders.end()) {
-        // First packet - initialize order
-        RemoteOrder order = { seqNum };
-        remoteOrders[remote] = order;
-        it = remoteOrders.find(remote); // Update iterator to point to the newly inserted entry
-
-        if (!allowOutofOrder) {
-            // In ordering mode, start from this sequence
-            it->second.expectedSeqNum = seqNum;
-        }
-        else {
-            // In allowOutOfOrder mode, expect next after this
-            it->second.expectedSeqNum = seqNum + 1;
-        }
-    }
-    else {
-        // Only update expectedSeqNum in allowOutOfOrder mode
-        // In ordering mode, reorderRemote manages it
-        if (allowOutofOrder) {
-            it->second.expectedSeqNum = seqNum + 1;
-        }
+        remoteOrders[remote] = RemoteOrder{seqNum};
+        it = remoteOrders.find(remote);
     }
 
-    if (allowOutofOrder) {
-        // Restart missing timer to clean up inactive remotes (even in allowOutOfOrder mode)
-        it->second.missingTimerActive = true;
-        it->second.missingTimerStart = std::chrono::steady_clock::now();
-        // Notify timer thread to re-evaluate
-        missingTimerCv.notify_all();
-    }
+    // Keep the most recent sequence seen for repeat detection. Explicit reordering is no longer supported.
+    it->second.expectedSeqNum = seqNum;
 }
 
 bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
@@ -930,12 +751,12 @@ bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
     auto it = remoteOrders.find(remote);
     if (it != remoteOrders.end()) {
         uint8_t expectedSeq = it->second.expectedSeqNum;
-        
-        // Check if this sequence number is less than expected
-        // Use signed 8-bit arithmetic to handle wraparound correctly
+
+        // A packet is a repeat if its sequence number is the same as, or older
+        // than, the most recent packet seen from this remote. This handles
+        // unsigned 8-bit wraparound without reordering packets.
         int8_t diff = (int8_t)seqNum - (int8_t)expectedSeq;
-        if (diff < 0 && diff > -128) {
-            // This is a repeat packet (sequence is in the past)
+        if (diff <= 0 && diff > -128) {
             return true;
         }
     }
@@ -1019,7 +840,6 @@ void SongbirdCore::flush() {
     {
         std::lock_guard<std::mutex> lock(dataMutex);
         readBuffer.clear();
-        incomingPackets.clear();
         headerMap.clear();
         newPacket = true;
     }
@@ -1031,8 +851,7 @@ std::size_t SongbirdCore::getReadBufferSize() {
 }
 
 std::size_t SongbirdCore::getNumIncomingPackets() {
-    std::lock_guard<std::mutex> lock(dataMutex);
-    return incomingPackets.size();
+    return 0;
 }
 
 void SongbirdCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {

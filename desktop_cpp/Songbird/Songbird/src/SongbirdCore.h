@@ -41,23 +41,8 @@ class SongbirdCore {
             }
         };
 
-        struct RemoteExpected {
-            Remote remote;
-            uint8_t seqNum;
-
-            bool operator==(const RemoteExpected& o) const {
-                return seqNum == o.seqNum && remote == o.remote;
-            }
-            bool operator!=(const RemoteExpected& o) const {
-                return !(*this == o);
-            }
-        };
-
         struct RemoteOrder {
-            uint8_t expectedSeqNum;
-            bool missingTimerActive = false;
-            // Desktop timer: store the time point when the missing timer was started
-            std::chrono::steady_clock::time_point missingTimerStart = std::chrono::steady_clock::time_point::min();
+            uint8_t expectedSeqNum = 0;
         };
 
         // Custom hash functor
@@ -65,15 +50,6 @@ class SongbirdCore {
             size_t operator()(SongbirdCore::Remote const& r) const noexcept {
                 // combine ip and port into a size_t
                 return std::hash<std::string>()(r.ip.to_string()) ^ (static_cast<size_t>(r.port) << 1);
-            }
-        };
-
-        struct RemoteExpectedHasher {
-            size_t operator()(SongbirdCore::RemoteExpected const& r) const noexcept {
-                RemoteHasher rHasher;
-                auto h1 = rHasher(r.remote);
-                auto h2 = std::hash<uint8_t>()(r.seqNum);
-                return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
             }
         };
 
@@ -186,11 +162,7 @@ class SongbirdCore {
         void setMissingPacketTimeout(uint32_t ms);
         void setRetransmissionTimeout(uint32_t ms);
         void setMaxRetransmitAttempts(uint32_t attempts);
-        void onMissingTimeout(const Remote remote);
 		void onRetransmissionTimeout(uint8_t seqNum);
-
-        // Whether out of order packets are allowed (less latency)
-        void setAllowOutofOrder(bool allow);
 
         std::size_t getNumIncomingPackets();
 
@@ -232,12 +204,10 @@ class SongbirdCore {
         ///////////////////////////////////////
         // Specific to packet mode
 
-        std::unordered_map<RemoteExpected, std::shared_ptr<SongbirdCore::Packet>, RemoteExpectedHasher> incomingPackets;
-
         // Outgoing packet sequence numbers
         std::atomic<uint8_t> nextSeqNum;
 
-        // Expected incoming packet sequence numbers by remotes
+        // Last sequence number seen per remote, used for repeat detection.
         std::unordered_map<Remote, RemoteOrder, RemoteHasher> remoteOrders;
         
         // Guaranteed delivery tracking: packets awaiting ACK
@@ -256,17 +226,12 @@ class SongbirdCore {
         std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;
 
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
-        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderPackets();
-        std::vector<std::shared_ptr<SongbirdCore::Packet>> reorderRemote(const Remote remote, RemoteOrder& remoteOrder);
         
         ////////////////////////////////////////
         // Specific to stream mode
 
         // New packet flag (looks for new packet in read buffer)
         bool newPacket = true;
-
-        // Allows out of order packets
-        bool allowOutofOrder = true;
 
         // Returns the next packet in readBuffer if there is one
         std::shared_ptr<Packet> packetFromStreamCOBS();

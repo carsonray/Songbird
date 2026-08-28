@@ -45,26 +45,9 @@ class Remote:
 
 
 @dataclass
-class RemoteExpected:
-    """Remote endpoint with expected sequence number."""
-    remote: Remote
-    seq_num: int
-
-    def __hash__(self):
-        return hash((self.remote, self.seq_num))
-
-    def __eq__(self, other):
-        if not isinstance(other, RemoteExpected):
-            return False
-        return self.remote == other.remote and self.seq_num == other.seq_num
-
-
-@dataclass
 class RemoteOrder:
-    """Tracks expected sequence number and missing packet timer for a remote."""
+    """Tracks the most recent sequence number seen from a remote."""
     expected_seq_num: int = 0
-    missing_timer_active: bool = False
-    missing_timer_start: float = 0.0
 
 
 @dataclass
@@ -295,7 +278,6 @@ class SongbirdCore:
         self.read_buffer = bytearray()
         
         # Packet mode specific
-        self.incoming_packets: Dict[RemoteExpected, Packet] = {}
         self.next_seq_num = 0
         self.remote_orders: Dict[Remote, RemoteOrder] = {}
         self.outgoing_guaranteed: Dict[int, OutgoingInfo] = {}
@@ -308,7 +290,6 @@ class SongbirdCore:
         
         # Stream mode specific
         self.new_packet = True
-        self.allow_out_of_order = True
         
         # Handlers
         self.read_handler: Optional[Callable[[Packet], None]] = None
@@ -327,46 +308,10 @@ class SongbirdCore:
         # Thread safety
         self.data_lock = threading.RLock()
         self.wait_lock = threading.Lock()
-        
-        # Timer thread
-        self.timer_stop = threading.Event()
-        self.timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
-        self.timer_thread.start()
 
     def __del__(self):
         """Cleanup on deletion."""
-        self.timer_stop.set()
-        if hasattr(self, 'timer_thread'):
-            self.timer_thread.join(timeout=1.0)
-
-    def _timer_loop(self):
-        """Background thread for timeout monitoring."""
-        while not self.timer_stop.wait(min(self.missing_packet_timeout_ms, 
-                                           self.retransmission_timeout_ms) / 1000.0):
-            now = time.time()
-            expired_remotes = []
-            retransmit_packets = []
-            
-            with self.data_lock:
-                # Check missing packet timeouts
-                for remote, order in list(self.remote_orders.items()):
-                    if order.missing_timer_active and order.missing_timer_start > 0:
-                        elapsed_ms = (now - order.missing_timer_start) * 1000
-                        if elapsed_ms >= self.missing_packet_timeout_ms:
-                            expired_remotes.append(remote)
-                
-                # Check retransmission timeouts
-                for seq_num, info in list(self.outgoing_guaranteed.items()):
-                    elapsed_ms = (now - info.send_time) * 1000
-                    if elapsed_ms >= self.retransmission_timeout_ms:
-                        retransmit_packets.append(seq_num)
-            
-            # Handle expired timeouts outside lock
-            for remote in expired_remotes:
-                self._on_missing_timeout(remote)
-            
-            for seq_num in retransmit_packets:
-                self._on_retransmission_timeout(seq_num)
+        pass
 
     def attach_stream(self, stream: IStream) -> None:
         """Attach a stream for communication."""
@@ -519,10 +464,6 @@ class SongbirdCore:
         with self.data_lock:
             self.max_retransmit_attempts = attempts
 
-    def set_allow_out_of_order(self, allow: bool) -> None:
-        """Set whether to allow out-of-order packets."""
-        self.allow_out_of_order = allow
-
     def send_packet(self, packet: Packet, guarantee_delivery: bool = False, 
                    seq_num: Optional[int] = None) -> None:
         """
@@ -596,22 +537,9 @@ class SongbirdCore:
             if self._check_for_ack(pkt):
                 return
             
-            dispatch = []
-            if self.allow_out_of_order or self.reliable_mode == ReliableMode.RELIABLE:
-                dispatch.append(pkt)
-                if self.reliable_mode == ReliableMode.UNRELIABLE:
-                    if (pkt.is_guaranteed()):
-                        self._update_remote_order(pkt)
-                    with self.data_lock:
-                        for expected_pkt in list(self.incoming_packets.values()):
-                            dispatch.append(expected_pkt)
-                        self.incoming_packets.clear()
-            elif self.reliable_mode == ReliableMode.UNRELIABLE:
+            dispatch = [pkt]
+            if self.reliable_mode == ReliableMode.UNRELIABLE and pkt.is_guaranteed():
                 self._update_remote_order(pkt)
-                with self.data_lock:
-                    remote_expected = RemoteExpected(pkt.get_remote(), pkt.get_sequence_num())
-                    self.incoming_packets[remote_expected] = pkt
-                dispatch = self._reorder_packets()
             
             for p in dispatch:
                 self._call_handlers(p)
@@ -792,110 +720,30 @@ class SongbirdCore:
         if global_handler:
             global_handler(pkt)
 
-    def _reorder_packets(self) -> List[Packet]:
-        """Reorder packets based on sequence numbers."""
-        with self.data_lock:
-            dispatch = []
-            for remote, order in list(self.remote_orders.items()):
-                dispatch.extend(self._reorder_remote(remote, order))
-            return dispatch
-
-    def _reorder_remote(self, remote: Remote, order: RemoteOrder) -> List[Packet]:
-        """Reorder packets for a specific remote."""
-        dispatch = []
-        while True:
-            key = RemoteExpected(remote, order.expected_seq_num)
-            if key in self.incoming_packets:
-                dispatch.append(self.incoming_packets.pop(key))
-                order.expected_seq_num = (order.expected_seq_num + 1) & 0xFF
-                if order.missing_timer_active:
-                    order.missing_timer_active = False
-                    order.missing_timer_start = 0.0
-                continue
-            
-            if not order.missing_timer_active:
-                order.missing_timer_active = True
-                order.missing_timer_start = time.time()
-            break
-        
-        return dispatch
-
-    def _on_missing_timeout(self, remote: Remote) -> None:
-        """Handle missing packet timeout."""
-        dispatch = []
-        with self.data_lock:
-            if remote not in self.remote_orders:
-                return
-            
-            order = self.remote_orders[remote]
-            
-            # Find nearest forward sequence number
-            found = False
-            best_dist = 256
-            best_seq = 0
-            
-            for key in self.incoming_packets.keys():
-                if key.remote != remote:
-                    continue
-                
-                seq = key.seq_num
-                # Calculate forward distance with wraparound
-                dist = (seq - order.expected_seq_num) & 0xFF
-                
-                if not found or dist < best_dist:
-                    found = True
-                    best_dist = dist
-                    best_seq = seq
-            
-            if found:
-                order.expected_seq_num = best_seq
-                order.missing_timer_active = False
-                dispatch = self._reorder_remote(remote, order)
-            else:
-                # No packets for this remote, remove it
-                del self.remote_orders[remote]
-                self.remote_map.pop(remote, None)
-        
-        for p in dispatch:
-            self._call_handlers(p)
-
     def _update_remote_order(self, pkt: Packet) -> None:
-        """Update remote order tracking."""
+        """Track the last sequence number used to suppress exact duplicates."""
         with self.data_lock:
             remote = pkt.get_remote()
             seq_num = pkt.get_sequence_num()
-            
-            if remote not in self.remote_orders:
-                self.remote_orders[remote] = RemoteOrder()
-                if not self.allow_out_of_order:
-                    self.remote_orders[remote].expected_seq_num = seq_num
-                else:
-                    self.remote_orders[remote].expected_seq_num = (seq_num + 1) & 0xFF
-            else:
-                if self.allow_out_of_order:
-                    self.remote_orders[remote].expected_seq_num = (seq_num + 1) & 0xFF
-            
-            if self.allow_out_of_order:
-                self.remote_orders[remote].expected_seq_num = (seq_num + 1) & 0xFF
-                self.remote_orders[remote].missing_timer_active = True
-                self.remote_orders[remote].missing_timer_start = time.time()
+            self.remote_orders[remote] = RemoteOrder(expected_seq_num=seq_num)
 
     def _is_repeat_packet(self, pkt: Packet) -> bool:
-        """Check if packet is a repeat."""
+        """Check if this guaranteed packet is an older or duplicate sequence than the latest seen."""
         if not pkt.is_guaranteed():
             return False
-        
+
         seq_num = pkt.get_sequence_num()
         remote = pkt.get_remote()
-        
+
         with self.data_lock:
             if remote in self.remote_orders:
                 expected_seq = self.remote_orders[remote].expected_seq_num
-                # Check if sequence is in the past (with wraparound)
+                # Treat any lower sequence number as a repeat relative to the last seen value.
+                # This also handles unsigned wraparound correctly in 8-bit arithmetic.
                 diff = (seq_num - expected_seq) & 0xFF
-                if diff > 128:  # In the past
+                if diff > 0x7F:
                     return True
-        return False
+            return False
 
     def _check_for_ack(self, pkt: Packet) -> bool:
         """Check and handle ACK packets."""
@@ -948,7 +796,6 @@ class SongbirdCore:
         """Flush all buffers."""
         with self.data_lock:
             self.read_buffer.clear()
-            self.incoming_packets.clear()
             self.header_map.clear()
             self.new_packet = True
 
@@ -958,9 +805,8 @@ class SongbirdCore:
             return len(self.read_buffer)
 
     def get_num_incoming_packets(self) -> int:
-        """Get number of buffered incoming packets."""
-        with self.data_lock:
-            return len(self.incoming_packets)
+        """Buffered reordering is intentionally disabled; keep the API as a compatibility no-op."""
+        return 0
 
     def _append_to_read_buffer(self, data: bytes) -> None:
         """Append data to read buffer."""

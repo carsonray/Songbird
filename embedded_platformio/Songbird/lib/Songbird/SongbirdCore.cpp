@@ -367,11 +367,6 @@ void SongbirdCore::setMaxRetransmitAttempts(uint8_t attempts) {
     maxRetransmitAttempts = attempts;
 }
 
-void SongbirdCore::setAllowOutofOrder(bool allow) {
-    if (allowOutofOrder == allow) return;
-    allowOutofOrder = allow;
-}
-
 void SongbirdCore::sendPacket(Packet& packet, bool guaranteeDelivery) {
     uint8_t seqNum = nextSeqNum++;
     sendPacket(packet, seqNum, guaranteeDelivery);
@@ -438,35 +433,9 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
             return; // Was an ACK packet, already handled
         }
 
-        std::vector<std::shared_ptr<Packet>> dispatch;
-        if (allowOutofOrder || reliableMode == RELIABLE) {
-            dispatch.push_back(pkt);
-            if (reliableMode == UNRELIABLE) {
-                // Update remoteOrders only for guaranteed packets (for repeat detection)
-                if (pkt->isGuaranteed()) {
-                    updateRemoteOrder(pkt);
-                }
-                SpinLockGuard guard(dataSpinlock);
-                // If any remaining packets in incoming packets add to dispatch
-                for (const auto &p: incomingPackets) {
-                    dispatch.push_back(p.second);
-                }
-                // Clear incomingPackets after dispatching them
-                incomingPackets.clear();
-            }
-        } else if (reliableMode == UNRELIABLE) {
-            // If it is a new remote and ordering mode is on, add to remote order map
-            // Track sequence numbers for ALL packets in ordering mode
+        std::vector<std::shared_ptr<Packet>> dispatch{ pkt };
+        if (reliableMode == UNRELIABLE && pkt->isGuaranteed()) {
             updateRemoteOrder(pkt);
-
-            {
-                SpinLockGuard guard(dataSpinlock);
-
-                const RemoteExpected expected{pkt->getRemote(), pkt->getSequenceNum()};
-                incomingPackets[expected] = pkt;
-            }
-
-            dispatch = reorderPackets();
         }
 
         // Call handlers on dispatched packets
@@ -674,157 +643,30 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
     if (globalHandler) globalHandler(pkt);
 }
 
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderPackets()
-{
-    std::vector<std::shared_ptr<Packet>> dispatch;
-    
-    {
-        SpinLockGuard guard(dataSpinlock);
-
-        // Iterating through remotes
-        for (auto itOrder = remoteOrders.begin(); itOrder != remoteOrders.end(); ++itOrder)
-        {
-            Remote r = itOrder->first;
-            RemoteOrder& order = itOrder->second;
-
-            auto remotePackets = reorderRemote(r, order);
-            dispatch.insert(dispatch.end(), remotePackets.begin(), remotePackets.end());
-        }
-    }
-
-    return dispatch;
-}
-
-std::vector<std::shared_ptr<SongbirdCore::Packet>> SongbirdCore::reorderRemote(const SongbirdCore::Remote r, SongbirdCore::RemoteOrder& order) {
-    std::vector<std::shared_ptr<SongbirdCore::Packet>> dispatch;
-    while (true)
-    {
-        const RemoteExpected key{ r, order.expectedSeqNum };
-        auto itPkt = incomingPackets.find(key);
-
-        // Checks for packet with correct sequence number
-        if (itPkt != incomingPackets.end())
-        {
-            dispatch.push_back(itPkt->second);
-            incomingPackets.erase(itPkt);
-            order.expectedSeqNum++;
-            if (order.missingTimerActive) {
-                // Stop missing timer
-                order.missingTimerActive = false;
-            }
-            continue;
-        }
-
-        // No packets with correct sequence, start timeout if not already active
-        if (!order.missingTimerActive)
-        {
-            // Record start time for missing packet timeout
-            order.missingTimerStartMicros = micros();
-            order.missingTimerActive = true;
-            break;
-        }
-
-        break;
-    }
-    return dispatch;
-}
-
-void SongbirdCore::onMissingTimeout(const Remote remote) {
-    std::vector<std::shared_ptr<Packet>> dispatch;
-    
-    {
-        SpinLockGuard guard(dataSpinlock);
-        // Timeout: find nearest forward seqNum for this remote
-        bool found = false;
-        uint8_t bestDist = 0xFF;
-        uint8_t bestSeq = 0;
-
-        // Finds remote order from map
-        auto it = remoteOrders.find(remote);
-        if (it == remoteOrders.end()) return;
-        RemoteOrder& order = it->second;
-
-        for (auto &p : incomingPackets)
-        {
-            if (p.first.remote != remote) continue;
-
-            uint8_t seq = p.first.seqNum;
-            uint8_t dist = uint8_t(seq - order.expectedSeqNum);
-
-            if (!found || dist < bestDist)
-            {
-                found = true;
-                bestDist = dist;
-                bestSeq = seq;
-            }
-        }
-
-        if (found)
-        {
-            // Advance expectedSeqNum to the next available
-            order.expectedSeqNum = bestSeq;
-            // Stop missing timer and trigger reorder
-            order.missingTimerActive = false;
-        } else {
-            // No packets available; just mark timer inactive
-            order.missingTimerActive = false;
-        }
-    }
-
-    // Reorder packets now that we've advanced the sequence
-    auto reordered = reorderPackets();
-    for (auto& pkt : reordered) {
-        callHandlers(pkt);
-    }
-}
-
 void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
     Remote remote = pkt->getRemote();
     uint8_t seqNum = pkt->getSequenceNum();
-    
+
     SpinLockGuard guard(dataSpinlock);
-    auto it = remoteOrders.find(remote);
-    if (it == remoteOrders.end()) {
-        // First packet from this remote - initialize expectedSeqNum
-        RemoteOrder order = {seqNum, 0, false};
-        remoteOrders[remote] = order;
-        it = remoteOrders.find(remote);
-        
-        // In ordering mode, we expect the next packet after this one
-        // In allowOutOfOrder mode, same thing (for repeat detection)
-        if (!allowOutofOrder) {
-            // In ordering mode, start from this sequence number
-            it->second.expectedSeqNum = seqNum;
-        } else {
-            // In allowOutOfOrder mode, expect the next sequence after this one
-            it->second.expectedSeqNum = seqNum + 1;
-        }
-    } else {
-        // Remote order already exists
-        // Only update expectedSeqNum in allowOutOfOrder mode (for repeat detection)
-        // In ordering mode, expectedSeqNum is managed by reorderRemote
-        if (allowOutofOrder) {
-            it->second.expectedSeqNum = seqNum + 1;
-        }
-    }
+    remoteOrders[remote] = RemoteOrder{seqNum};
 }
 
 bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
-    // Only check for repeat if guaranteed delivery is enabled
     if (!pkt->isGuaranteed()) return false;
 
     uint8_t seqNum = pkt->getSequenceNum();
     Remote remote = pkt->getRemote();
-    
+
     SpinLockGuard guard(dataSpinlock);
     auto it = remoteOrders.find(remote);
     if (it != remoteOrders.end()) {
         uint8_t expectedSeq = it->second.expectedSeqNum;
-        // Check if this sequence number is less than expected
-        // Use signed 8-bit arithmetic to handle wraparound correctly
+
+        // A packet is a repeat if its sequence is the same as, or older than,
+        // the most recent packet seen from this remote; wraparound is handled
+        // by comparing signed 8-bit deltas.
         int8_t diff = (int8_t)seqNum - (int8_t)expectedSeq;
-        if (diff < 0 && diff > -128) {
-            // This is a repeat packet (sequence is in the past)
+        if (diff <= 0 && diff > -128) {
             return true;
         }
     }
@@ -903,7 +745,6 @@ void SongbirdCore::flush() {
     {
         SpinLockGuard guard(dataSpinlock);
         readBuffer.clear();
-        incomingPackets.clear();
         headerMap.clear();
         newPacket = true;
     }
@@ -915,8 +756,7 @@ std::size_t SongbirdCore::getReadBufferSize() {
 }
 
 std::size_t SongbirdCore::getNumIncomingPackets() {
-    SpinLockGuard guard(dataSpinlock);
-    return incomingPackets.size();
+    return 0;
 }
 
 void SongbirdCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {

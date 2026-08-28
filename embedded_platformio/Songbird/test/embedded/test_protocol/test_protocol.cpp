@@ -172,73 +172,6 @@ void test_request_response() {
     TEST_ASSERT_NULL_MESSAGE(resp2.get(), "Should timeout waiting for nonexistent response");
 }
 
-void test_reliability_off() {
-    auto cores = makeLinkedCores();
-    auto a = cores.coreA;
-    auto b = cores.coreB;
-
-    b->setAllowOutofOrder(true);
-
-    std::vector<uint8_t> headers;
-    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
-        headers.push_back(pkt->getHeader());
-    });
-
-    // Send three packets with out of order sequence numbers
-    // Note: Avoid header 0x00 as it's reserved for ACK
-    uint8_t seqNums[3] = {1, 3, 2};
-    uint8_t sendHeaders[3] = {0x10, 0x13, 0x12};
-    for (uint8_t i = 0; i < 3; ++i) {
-        auto p = a->createPacket(sendHeaders[i]);
-        p.writeByte(seqNums[i]);
-        a->sendPacket(p, seqNums[i]);
-        // Give B the bytes
-        cores.streamB->updateData();
-    }
-
-    // Waits for timeout
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[0], headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[1], headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[2], headers[2], "Third header");
-}
-
-void test_ordering_reliability() {
-    auto cores = makeLinkedCores();
-    auto a = cores.coreA;
-    auto b = cores.coreB;
-
-    b->setAllowOutofOrder(false);
-
-    std::vector<uint8_t> headers;
-    b->setReadHandler([&](std::shared_ptr<SongbirdCore::Packet> pkt){
-        headers.push_back(pkt->getHeader());
-    });
-
-    // Send three packets with out of order sequence numbers
-    // Note: Avoid header 0x00 as it's reserved for ACK
-    // Start with seq 1 to avoid needing extra updates for ordering
-    uint8_t seqNums[3] = {1, 4, 2};
-    uint8_t sendHeaders[3] = {0x11, 0x14, 0x12};
-    for (uint8_t i = 0; i < 3; ++i) {
-        auto p = a->createPacket(sendHeaders[i]);
-        p.writeByte(seqNums[i]);
-        a->sendPacket(p, seqNums[i]);
-        // Give B the bytes
-        cores.streamB->updateData();
-    }
-
-    // Waits for timeout
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(3, headers.size(), "Should have received three packets");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[0], headers[0], "First header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[2], headers[1], "Second header");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(sendHeaders[1], headers[2], "Third header");
-}
-
 void test_integer_payload() {
     auto cores = makeLinkedCores();
     auto a = cores.coreA;
@@ -569,8 +502,6 @@ void setup() {
     RUN_TEST(test_basic_send_receive);
     RUN_TEST(test_specific_handler);
     RUN_TEST(test_request_response);
-    RUN_TEST(test_reliability_off);
-    RUN_TEST(test_ordering_reliability);
     RUN_TEST(test_integer_payload);
     RUN_TEST(test_float_payload);
     RUN_TEST(test_guaranteed_delivery_with_retransmit);
