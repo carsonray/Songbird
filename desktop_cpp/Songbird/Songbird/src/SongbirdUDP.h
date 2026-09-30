@@ -17,11 +17,9 @@ public:
     bool listen(unsigned short listenPort);
 	
     bool listenMulticast(const boost::asio::ip::address &addr, uint16_t port);
-    // setRemote now accepts a bind flag; if true the socket will be connected to the remote endpoint
-    void setRemote(const boost::asio::ip::address &addr, uint16_t port, bool bind = false);
+    void setEndpoint(const boost::asio::ip::address &addr, uint16_t port, bool bind = false);
     void setBroadcastMode(bool mode);
-    boost::asio::ip::address getRemoteIP();
-    uint16_t getRemotePort();
+    IStream::Endpoint getEndpoint() const override;
     uint16_t getLocalPort();
     std::shared_ptr<SongbirdCore> getProtocol();
     bool isBroadcast();
@@ -40,9 +38,7 @@ public:
     // write helper matching embedded API (sends to configured remote)
     void write(const uint8_t* buffer, std::size_t length) override;
 
-    bool supportsRemoteWrite() const override;
-    void writeToRemote(const uint8_t* buffer, std::size_t length, const boost::asio::ip::address& ip, uint16_t port) override;
-    bool getDefaultRemote(boost::asio::ip::address& outIP, uint16_t& outPort) override;
+    void write(const uint8_t* buffer, std::size_t length, const IStream::Endpoint& endpoint) override;
 
     // Start internal async read loop
     void startAsyncReadLoop();
@@ -58,8 +54,7 @@ private:
     std::shared_ptr<SongbirdCore> protocol;
     bool broadcastMode{false};
     bool multicastMode{false};
-    boost::asio::ip::address remoteIP;
-    uint16_t remotePort{0};
+    IStream::Endpoint endpoint;
     uint16_t localPort{0};
 
     // If true, socket is connected to remote and write should use send (no endpoint)

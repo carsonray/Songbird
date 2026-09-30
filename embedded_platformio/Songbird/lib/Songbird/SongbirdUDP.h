@@ -27,8 +27,8 @@ public:
     // Subscribes to multicast
     bool listenMulticast(const IPAddress &addr, uint16_t port);
 
-    // Sets remote address and port
-    bool setRemote(const IPAddress &addr, uint16_t port, bool bind = false);
+    // Sets the default endpoint address and port
+    bool setEndpoint(const IPAddress &addr, uint16_t port, bool bind = false);
     // Sets broadcast mode
     void setBroadcastMode(bool broadcastMode);
 
@@ -36,8 +36,7 @@ public:
     bool isMulticast();
     bool isBound();
 
-    IPAddress getRemoteIP();
-    uint16_t getRemotePort();
+    IStream::Endpoint getEndpoint() const override;
     // Gets local port
     uint16_t getLocalPort();
     std::shared_ptr<SongbirdCore> getProtocol();
@@ -47,9 +46,7 @@ public:
     bool isOpen() const override;
     void close() override;
     void updateData() override { update(); }
-    bool supportsRemoteWrite() const override;
-    void writeToRemote(const uint8_t* buffer, std::size_t length, const IPAddress& ip, uint16_t port) override;
-    bool getDefaultRemote(IPAddress& outIP, uint16_t& outPort) override;
+    void write(const uint8_t* buffer, std::size_t length, const IStream::Endpoint& endpoint) override;
 
 private:
     std::shared_ptr<SongbirdCore> protocol;
@@ -58,8 +55,7 @@ private:
     bool broadcastMode;
     bool multicastMode;
     bool bindMode;
-    IPAddress remoteIP;
-    uint16_t remotePort;
+    IStream::Endpoint endpoint;
     uint16_t localPort;
 };
 

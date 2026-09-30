@@ -5,11 +5,21 @@ Abstract base class defining the interface for communication streams.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional
 
 
 class IStream(ABC):
     """Abstract interface for communication streams."""
+
+    @dataclass(frozen=True)
+    class Endpoint:
+        """Address understood by a concrete stream."""
+        ip: str = ""
+        port: int = 0
+
+        def get_default(self) -> "IStream.Endpoint":
+            return self
 
     @abstractmethod
     def write(self, buffer: bytes) -> None:
@@ -36,34 +46,9 @@ class IStream(ABC):
         """Close the stream."""
         pass
 
-    def supports_remote_write(self) -> bool:
-        """
-        Check if this stream supports dynamic remote addressing.
-        
-        Returns:
-            True if the stream supports writing to specific remotes
-        """
-        return False
+    def get_endpoint(self) -> "IStream.Endpoint":
+        return IStream.Endpoint()
 
-    def write_to_remote(self, buffer: bytes, ip: str, port: int) -> None:
-        """
-        Write to a specific remote endpoint.
-        
-        Only supported if supports_remote_write() returns True.
-        Default implementation ignores remote and uses normal write.
-        
-        Args:
-            buffer: Bytes to write
-            ip: Remote IP address
-            port: Remote port number
-        """
+    def write_to_endpoint(self, buffer: bytes, endpoint: "IStream.Endpoint") -> None:
+        """Write to a stream-specific endpoint, or use normal stream output."""
         self.write(buffer)
-
-    def get_default_remote(self) -> Optional[Tuple[str, int]]:
-        """
-        Get the default remote for this stream.
-        
-        Returns:
-            Tuple of (ip, port) if a default remote exists, None otherwise
-        """
-        return None

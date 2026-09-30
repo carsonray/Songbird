@@ -34,9 +34,6 @@ class MockStream(IStream):
     def close(self) -> None:
         self.open = False
 
-    def supports_remote_write(self) -> bool:
-        return False
-
     def update_data(self) -> None:
         if not self.incoming:
             return
@@ -66,9 +63,6 @@ class StreamMockStream(IStream):
 
     def close(self) -> None:
         self.open = False
-
-    def supports_remote_write(self) -> bool:
-        return False
 
     def update_data(self) -> None:
         if not self.incoming:

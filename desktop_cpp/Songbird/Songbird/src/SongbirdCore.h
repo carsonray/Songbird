@@ -29,29 +29,17 @@ class SongbirdCore {
             RELIABLE
 		};
 
-        struct Remote {
-            boost::asio::ip::address ip;
-            uint16_t port;
-
-            bool operator==(const Remote& o) const {
-                return ip == o.ip && port == o.port;
-            }
-            bool operator!=(const Remote& o) const {
-                return !(*this == o);
-            }
-        };
-
-        struct RemoteOrder {
+        struct EndpointOrder {
             uint8_t expectedSeqNum = 0;
             bool missingTimerActive = false;
             std::chrono::steady_clock::time_point missingTimerStart = std::chrono::steady_clock::time_point::min();
         };
 
         // Custom hash functor
-        struct RemoteHasher {
-            size_t operator()(SongbirdCore::Remote const& r) const noexcept {
+        struct EndpointHasher {
+            size_t operator()(IStream::Endpoint const& endpoint) const noexcept {
                 // combine ip and port into a size_t
-                return std::hash<std::string>()(r.ip.to_string()) ^ (static_cast<size_t>(r.port) << 1);
+                return std::hash<std::string>()(endpoint.ip.to_string()) ^ (static_cast<size_t>(endpoint.port) << 1);
             }
         };
 
@@ -78,12 +66,10 @@ class SongbirdCore {
             std::size_t getPayloadLength() const;
             std::size_t getRemainingBytes() const;
 
-            // Remote info (for server mode responses)
-            void setRemote(const boost::asio::ip::address &ip, uint16_t port);
-            void setRemote(const Remote& remote);
-            Remote getRemote() const;
-            boost::asio::ip::address getRemoteIP() const;
-            uint16_t getRemotePort() const;
+            // Endpoint info (for server mode responses)
+            void setEndpoint(const boost::asio::ip::address &ip, uint16_t port);
+            void setEndpoint(const IStream::Endpoint& endpoint);
+            IStream::Endpoint getEndpoint() const;
 
             // Writing functions
             void writeBytes(const uint8_t* buffer, std::size_t length);
@@ -120,15 +106,14 @@ class SongbirdCore {
             // read cursor into payload
             mutable std::size_t readPos = 0;
 
-            // Remote info (for server mode responses)
-            boost::asio::ip::address remoteIP;
-            uint16_t remotePort = 0;
+            // Endpoint info (for server mode responses)
+            IStream::Endpoint endpoint;
         };
 
         // Guaranteed packet tracking structure (defined after Packet class)
         struct OutgoingInfo {
             std::shared_ptr<Packet> packet;
-            Remote remote;
+            IStream::Endpoint endpoint;
             std::chrono::steady_clock::time_point sendTime;
             uint32_t retransmitCount = 0;
         };
@@ -145,14 +130,14 @@ class SongbirdCore {
         void setHeaderHandler(uint8_t header, ReadHandler handler);
         void clearHeaderHandler(uint8_t header);
 
-        // Attach a handler for packets with a particular remote source
-        void setRemoteHandler(boost::asio::ip::address remoteIP, uint16_t remotePort, ReadHandler hander);
-        void clearRemoteHandler(boost::asio::ip::address remoteIP, uint16_t remotePort);
+        // Attach a handler for packets with a particular endpoint source
+        void setEndpointHandler(const IStream::Endpoint& endpoint, ReadHandler hander);
+        void clearEndpointHandler(const IStream::Endpoint& endpoint);
 
         // Blocking wait for a packet with the given header (returns nullptr on timeout)
         std::shared_ptr<Packet> waitForHeader(uint8_t header, uint32_t timeoutMs);
-        // Blocking wait for a packet with the given remote (returns nullptr on timeout)
-        std::shared_ptr<Packet> waitForRemote(boost::asio::ip::address remoteIP, uint16_t remotePort, uint32_t timeoutMs);
+        // Blocking wait for a packet with the given endpoint (returns nullptr on timeout)
+        std::shared_ptr<Packet> waitForEndpoint(const IStream::Endpoint& endpoint, uint32_t timeoutMs);
 
         // Attaches stream object
         void attachStream(IStream* stream);
@@ -189,7 +174,7 @@ class SongbirdCore {
 
         // Parses data from stream
         void parseData(const uint8_t* data, std::size_t length);
-        void parseData(const uint8_t* data, std::size_t length, boost::asio::ip::address remoteIP, uint16_t remotePort);
+        void parseData(const uint8_t* data, std::size_t length, const IStream::Endpoint& endpoint);
 
     private:
         SongbirdCore* self;
@@ -209,8 +194,8 @@ class SongbirdCore {
         // Outgoing packet sequence numbers
         std::atomic<uint8_t> nextSeqNum;
 
-        // Last sequence number seen per remote, used for repeat detection.
-        std::unordered_map<Remote, RemoteOrder, RemoteHasher> remoteOrders;
+        // Last sequence number seen per endpoint, used for repeat detection.
+        std::unordered_map<IStream::Endpoint, EndpointOrder, EndpointHasher> endpointOrders;
         
         // Guaranteed delivery tracking: packets awaiting ACK
         std::unordered_map<uint8_t, OutgoingInfo> outgoingGuaranteed;
@@ -224,8 +209,8 @@ class SongbirdCore {
 
         uint64_t lastDataTimeMs = 0;
 
-        // Handlers by remotes
-        std::unordered_map<Remote, ReadHandler, RemoteHasher> remoteHandlers;
+        // Handlers by endpoints
+        std::unordered_map<IStream::Endpoint, ReadHandler, EndpointHasher> endpointHandlers;
 
         std::shared_ptr<SongbirdCore::Packet> packetFromData(const uint8_t* data, std::size_t length);
         
@@ -255,8 +240,8 @@ class SongbirdCore {
         void removeAcknowledgedPacket(uint8_t seqNum);
         bool checkForAck(std::shared_ptr<Packet> packet);
 
-        // Helper to update or create remoteOrder entry
-        void updateRemoteOrder(std::shared_ptr<Packet>);
+        // Helper to update or create endpoint order entry
+        void updateEndpointOrder(std::shared_ptr<Packet>);
 
         // Helper to check if a packet is a repeat
         bool isRepeatPacket(std::shared_ptr<Packet> pkt);
@@ -272,8 +257,8 @@ class SongbirdCore {
         std::unordered_map<uint8_t, ReadHandler> headerHandlers;
         // last packet received per header (for waitForHeader)
         std::unordered_map<uint8_t, std::shared_ptr<SongbirdCore::Packet>> headerMap;
-        // last packet received per remote (for waitForRemote)
-        std::unordered_map<Remote, std::shared_ptr<SongbirdCore::Packet>, RemoteHasher> remoteMap;
+        // last packet received per endpoint (for waitForEndpoint)
+        std::unordered_map<IStream::Endpoint, std::shared_ptr<SongbirdCore::Packet>, EndpointHasher> endpointMap;
 
         // Internal waiter object used to avoid missed notifications
         struct Waiter {
@@ -282,9 +267,9 @@ class SongbirdCore {
             std::atomic<bool> signalled{false};
         };
 
-        // Waiter registries (per-header and per-remote) to support multiple concurrent waiters
+        // Waiter registries (per-header and per-endpoint) to support multiple concurrent waiters
         std::unordered_map<uint8_t, std::vector<std::shared_ptr<Waiter>>> headerWaiters;
-        std::unordered_map<Remote, std::vector<std::shared_ptr<Waiter>>, RemoteHasher> remoteWaiters;
+        std::unordered_map<IStream::Endpoint, std::vector<std::shared_ptr<Waiter>>, EndpointHasher> endpointWaiters;
 
         // Timer thread and synchronization for desktop missing-packet timeout handling
         std::thread missingTimerThread;

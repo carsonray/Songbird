@@ -5,23 +5,37 @@
 
 class IStream {
 public:
+    class Endpoint {
+    public:
+        boost::asio::ip::address ip;
+        uint16_t port = 0;
+
+        bool operator==(const Endpoint& other) const {
+            return ip == other.ip && port == other.port;
+        }
+
+        bool operator!=(const Endpoint& other) const {
+            return !(*this == other);
+        }
+
+        Endpoint getDefault() const {
+            return *this;
+        }
+    };
+
     virtual ~IStream() = default;
 
     virtual void write(const uint8_t* buffer, std::size_t length) = 0;
     virtual bool isOpen() const = 0;
     virtual void close() = 0;
 
-    // Returns true if this stream supports dynamic remote addressing
-    virtual bool supportsRemoteWrite() const { return false; }
-
-    // Write to a specific remote (only supported if supportsRemoteWrite() returns true)
-    virtual void writeToRemote(const uint8_t* buffer, std::size_t length, const boost::asio::ip::address& ip, uint16_t port) {
-        // Default implementation ignores remote and uses normal write
-        write(buffer, length);
+    virtual Endpoint getEndpoint() const {
+        return Endpoint{};
     }
 
-    // Get the default remote for this stream (returns true if a default remote exists)
-    virtual bool getDefaultRemote(boost::asio::ip::address& outIP, uint16_t& outPort) { return false; }
+    virtual void write(const uint8_t* buffer, std::size_t length, const Endpoint&) {
+        write(buffer, length);
+    }
 };
 
 #endif // ISTREAM_H

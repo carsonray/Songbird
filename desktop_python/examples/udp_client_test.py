@@ -7,7 +7,7 @@ Counterpart to the C++ UDPClientTest.
 
 import time
 import sys
-from songbird import SongbirdUDP
+from songbird import IStream, SongbirdUDP
 
 
 UDP_REMOTE_ADDR = "192.168.0.114"  # Change to your remote address
@@ -135,7 +135,7 @@ def run_remote_response(core):
     pkt.write_byte(0x77)
     core.send_packet(pkt)
     
-    response = core.wait_for_remote(UDP_REMOTE_ADDR, UDP_REMOTE_PORT, 2000)
+    response = core.wait_for_endpoint(IStream.Endpoint(UDP_REMOTE_ADDR, UDP_REMOTE_PORT), 2000)
     
     if response and response.get_header() == 0x50:
         if response.read_byte() == 0x77:
@@ -254,7 +254,7 @@ def main():
     print(f"Listening on port {UDP_LOCAL_PORT}")
     
     # Set remote endpoint
-    udp.set_remote(UDP_REMOTE_ADDR, UDP_REMOTE_PORT)
+    udp.set_endpoint(UDP_REMOTE_ADDR, UDP_REMOTE_PORT)
     
     core = udp.get_protocol()
     

@@ -68,27 +68,17 @@ std::size_t SongbirdCore::Packet::getRemainingBytes() const {
     return payload.size() - readPos;
 }
 
-void SongbirdCore::Packet::setRemote(const IPAddress& ip, uint16_t port) {
-    remoteIP = ip;
-    remotePort = port;
+void SongbirdCore::Packet::setEndpoint(const IPAddress& ip, uint16_t port) {
+    endpoint.ip = ip;
+    endpoint.port = port;
 }
 
-void SongbirdCore::Packet::setRemote(const Remote& remote) {
-    remoteIP = remote.ip;
-    remotePort = remote.port;
+void SongbirdCore::Packet::setEndpoint(const IStream::Endpoint& value) {
+    endpoint = value;
 }
 
-SongbirdCore::Remote SongbirdCore::Packet::getRemote() const {
-    Remote remote {remoteIP, remotePort};
-    return remote;
-}
-
-IPAddress SongbirdCore::Packet::getRemoteIP() const {
-    return remoteIP;
-}
-
-uint16_t SongbirdCore::Packet::getRemotePort() const {
-    return remotePort;
+IStream::Endpoint SongbirdCore::Packet::getEndpoint() const {
+    return endpoint;
 }
 
 void SongbirdCore::Packet::writeBytes(const uint8_t* buffer, std::size_t length) {
@@ -266,17 +256,15 @@ void SongbirdCore::clearHeaderHandler(uint8_t header) {
     headerMap.erase(header);
 }
 
-void SongbirdCore::setRemoteHandler(IPAddress remoteIP, uint16_t remotePort, ReadHandler handler) {
+void SongbirdCore::setEndpointHandler(const IStream::Endpoint& endpoint, ReadHandler handler) {
     SpinLockGuard guard(dataSpinlock);
-    Remote remote{remoteIP, remotePort};
-    remoteHandlers[remote] = std::move(handler);
+    endpointHandlers[endpoint] = std::move(handler);
 }
 
-void SongbirdCore::clearRemoteHandler(IPAddress remoteIP, uint16_t remotePort) {
+void SongbirdCore::clearEndpointHandler(const IStream::Endpoint& endpoint) {
     SpinLockGuard guard(dataSpinlock);
-    Remote remote{remoteIP, remotePort};
-    remoteHandlers.erase(remote);
-    remoteMap.erase(remote);
+    endpointHandlers.erase(endpoint);
+    endpointMap.erase(endpoint);
 }
 
 std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header, uint32_t timeoutMs) {
@@ -310,15 +298,14 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForHeader(uint8_t header
     return nullptr;
 }
 
-std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForRemote(IPAddress remoteIP, uint16_t remotePort, uint32_t timeoutMs) {
-    Remote remote {remoteIP, remotePort};
+std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForEndpoint(const IStream::Endpoint& endpoint, uint32_t timeoutMs) {
     // First check if a packet is already available
     {
         SpinLockGuard guard(dataSpinlock);
-        auto it = remoteMap.find(remote);
-        if (it != remoteMap.end()) {
+        auto it = endpointMap.find(endpoint);
+        if (it != endpointMap.end()) {
             auto pkt = it->second;
-            remoteMap.erase(it);
+            endpointMap.erase(it);
             return pkt;
         }
     }
@@ -330,10 +317,10 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::waitForRemote(IPAddress remo
         
         {
             SpinLockGuard guard(dataSpinlock);
-            auto it = remoteMap.find(remote);
-            if (it != remoteMap.end()) {
+            auto it = endpointMap.find(endpoint);
+            if (it != endpointMap.end()) {
                 auto pkt = it->second;
-                remoteMap.erase(it);
+                endpointMap.erase(it);
                 return pkt;
             }
         }
@@ -387,28 +374,16 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guarante
     
     // Write directly to stream in both modes
     std::vector<uint8_t> bytes = packet.toBytes(processMode, reliableMode);
-    Remote remote = packet.getRemote();
-    bool supportsRemote = stream->supportsRemoteWrite();
-    if (supportsRemote && remote.port != 0) {
-        stream->writeToRemote(bytes.data(), bytes.size(), remote.ip, remote.port);
-    } else {
-        stream->write(bytes.data(), bytes.size());
+    IStream::Endpoint endpoint = packet.getEndpoint();
+    if (endpoint.port == 0) {
+        endpoint = stream->getEndpoint().getDefault();
+        packet.setEndpoint(endpoint);
     }
+    stream->write(bytes.data(), bytes.size(), endpoint);
 
     // Track guaranteed packets and record send time (UNRELIABLE mode only)
     if (guaranteeDelivery && reliableMode == UNRELIABLE) {
-        Remote remote = packet.getRemote();
-        // If packet doesn't have a valid remote, use the stream's default remote
-        if (supportsRemote && remote.port == 0) {
-            IPAddress defaultIP;
-            uint16_t defaultPort;
-            if (stream->getDefaultRemote(defaultIP, defaultPort)) {
-                remote.ip = defaultIP;
-                remote.port = defaultPort;
-                packet.setRemote(remote);
-            }
-        }
-        OutgoingInfo info{std::make_shared<Packet>(packet), remote, micros(), 0};
+        OutgoingInfo info{std::make_shared<Packet>(packet), packet.getEndpoint(), micros(), 0};
         {
             SpinLockGuard guard(dataSpinlock);
             outgoingGuaranteed[sequenceNum] = info;
@@ -417,15 +392,15 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guarante
 }
 
 void SongbirdCore::parseData(const uint8_t* data, std::size_t length) {
-    parseData(data, length, IPAddress(), 0);
+    parseData(data, length, IStream::Endpoint{});
 }
 
-void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress remoteIP, uint16_t remotePort) {
+void SongbirdCore::parseData(const uint8_t* data, std::size_t length, const IStream::Endpoint& endpoint) {
     if (processMode == PACKET) {
         // Parses full packet
         auto pkt = packetFromData(data, length);
         if (!pkt) return;
-        pkt->setRemote(remoteIP, remotePort);
+        pkt->setEndpoint(endpoint);
 
         // Check for ACK and handle guaranteed delivery before buffering/dispatching
         // This ensures ACKs are sent immediately even if packet gets buffered as out-of-order
@@ -435,7 +410,7 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
 
         std::vector<std::shared_ptr<Packet>> dispatch{ pkt };
         if (reliableMode == UNRELIABLE && pkt->isGuaranteed()) {
-            updateRemoteOrder(pkt);
+            updateEndpointOrder(pkt);
         }
 
         // Call handlers on dispatched packets
@@ -460,7 +435,7 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
                 break;
             }
             lastDataTimeMs = millis();
-            pkt->setRemote(remoteIP, remotePort);
+            pkt->setEndpoint(endpoint);
 
             // Check for ACK and handle guaranteed delivery
             if (checkForAck(pkt)) {
@@ -469,7 +444,7 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
 
             // Updates remote order for UNRELIABLE mode (for all packets for sequencing)
             if (reliableMode == UNRELIABLE) {
-                updateRemoteOrder(pkt);
+                updateEndpointOrder(pkt);
             }
             
             callHandlers(pkt);
@@ -621,10 +596,10 @@ std::vector<uint8_t> SongbirdCore::cobsDecode(const uint8_t* data, std::size_t l
 
 void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
     uint8_t header = pkt->getHeader();
-    Remote remote = pkt->getRemote();
+    IStream::Endpoint endpoint = pkt->getEndpoint();
     // Lookup and store handlers under locks, but invoke them outside locks
     ReadHandler headerHandler = nullptr;
-    ReadHandler remoteHandler = nullptr;
+    ReadHandler endpointHandler = nullptr;
     ReadHandler globalHandler = nullptr;
     {
         SpinLockGuard guard(dataSpinlock);
@@ -634,36 +609,36 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
         // update header map
         headerMap[header] = pkt;
 
-        auto it2 = remoteHandlers.find(remote);
-        if (it2 != remoteHandlers.end()) remoteHandler = it2->second;
-        // update last remote map
-        remoteMap[remote] = pkt;
+        auto it2 = endpointHandlers.find(endpoint);
+        if (it2 != endpointHandlers.end()) endpointHandler = it2->second;
+        // update last endpoint map
+        endpointMap[endpoint] = pkt;
         
         globalHandler = readHandler;
     }
 
     if (headerHandler) headerHandler(pkt);
-    if (remoteHandler) remoteHandler(pkt);
+    if (endpointHandler) endpointHandler(pkt);
     if (globalHandler) globalHandler(pkt);
 }
 
-void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
-    Remote remote = pkt->getRemote();
+void SongbirdCore::updateEndpointOrder(std::shared_ptr<Packet> pkt) {
+    IStream::Endpoint endpoint = pkt->getEndpoint();
     uint8_t seqNum = pkt->getSequenceNum();
     uint32_t now = millis();
 
     SpinLockGuard guard(dataSpinlock);
-    for (auto it = remoteOrders.begin(); it != remoteOrders.end();) {
+    for (auto it = endpointOrders.begin(); it != endpointOrders.end();) {
         if (it->second.missingTimerActive &&
             static_cast<uint32_t>(now - it->second.missingTimerStartMs) >= missingPacketTimeoutMs) {
-            remoteMap.erase(it->first);
-            it = remoteOrders.erase(it);
+            endpointMap.erase(it->first);
+            it = endpointOrders.erase(it);
         } else {
             ++it;
         }
     }
 
-    RemoteOrder& order = remoteOrders[remote];
+    EndpointOrder& order = endpointOrders[endpoint];
     order.expectedSeqNum = seqNum;
     order.missingTimerActive = true;
     order.missingTimerStartMs = now;
@@ -673,15 +648,15 @@ bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
     if (!pkt->isGuaranteed()) return false;
 
     uint8_t seqNum = pkt->getSequenceNum();
-    Remote remote = pkt->getRemote();
+    IStream::Endpoint endpoint = pkt->getEndpoint();
 
     SpinLockGuard guard(dataSpinlock);
-    auto it = remoteOrders.find(remote);
-    if (it != remoteOrders.end()) {
+    auto it = endpointOrders.find(endpoint);
+    if (it != endpointOrders.end()) {
         uint8_t expectedSeq = it->second.expectedSeqNum;
 
         // A packet is a repeat if its sequence is the same as, or older than,
-        // the most recent packet seen from this remote; wraparound is handled
+        // the most recent packet seen from this endpoint; wraparound is handled
         // by comparing signed 8-bit deltas.
         int8_t diff = (int8_t)seqNum - (int8_t)expectedSeq;
         if (diff <= 0 && diff > -128) {
@@ -709,12 +684,11 @@ bool SongbirdCore::checkForAck(std::shared_ptr<Packet> pkt) {
     if (pkt->isGuaranteed()) {
         // Send ACK back to sender
         uint8_t seqNum = pkt->getSequenceNum();
-        IPAddress remoteIP = pkt->getRemoteIP();
-        uint16_t remotePort = pkt->getRemotePort();
+        IStream::Endpoint endpoint = pkt->getEndpoint();
         
         // Create ACK packet
         Packet ackPkt(0x00); // ACK header
-        ackPkt.setRemote(remoteIP, remotePort);
+        ackPkt.setEndpoint(endpoint);
         // Send ACK packet (even for repeats, in case the ACK was dropped)
         sendPacket(ackPkt, seqNum, false);
     }

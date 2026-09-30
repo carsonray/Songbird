@@ -13,7 +13,7 @@ SongbirdUDP::SongbirdUDP(std::string name)
     protocol->setRetransmitTimeout(100); // Short timeout for UDP
     udp.onPacket([this](AsyncUDPPacket packet) {
         // Parse received data with protocol
-        protocol->parseData(packet.data(), packet.length(), packet.remoteIP(), packet.remotePort());
+        protocol->parseData(packet.data(), packet.length(), IStream::Endpoint{packet.remoteIP(), packet.remotePort()});
     });
 }
 
@@ -38,10 +38,10 @@ bool SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
     return result;
 }
 
-bool SongbirdUDP::setRemote(const IPAddress &addr, uint16_t port, bool bind) {
+bool SongbirdUDP::setEndpoint(const IPAddress &addr, uint16_t port, bool bind) {
     // Attempts to connect to remote
-    remoteIP = addr;
-    remotePort = port;
+    endpoint.ip = addr;
+    endpoint.port = port;
     broadcastMode = false;
     bindMode = bind;
     if (bind) {
@@ -54,12 +54,8 @@ void SongbirdUDP::setBroadcastMode(bool mode) {
     this->broadcastMode = mode;
 }
 
-IPAddress SongbirdUDP::getRemoteIP() {
-    return remoteIP;
-}
-
-uint16_t SongbirdUDP::getRemotePort() {
-    return remotePort;
+IStream::Endpoint SongbirdUDP::getEndpoint() const {
+    return endpoint;
 }
 uint16_t SongbirdUDP::getLocalPort() {
     return localPort;
@@ -86,7 +82,7 @@ void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
         if (bindMode) {
             udp.write(buffer, length);
         } else {
-            udp.writeTo(buffer, length, remoteIP, remotePort, TCPIP_ADAPTER_IF_STA);
+            udp.writeTo(buffer, length, endpoint.ip, endpoint.port, TCPIP_ADAPTER_IF_STA);
         }
     } else {
         udp.broadcast(const_cast<uint8_t*>(buffer), length);
@@ -97,20 +93,13 @@ bool SongbirdUDP::isOpen() const {
     return opened;
 }
 
-bool SongbirdUDP::supportsRemoteWrite() const {
-    return true;
-}
-
-void SongbirdUDP::writeToRemote(const uint8_t* buffer, std::size_t length, const IPAddress& ip, uint16_t port) {
+void SongbirdUDP::write(const uint8_t* buffer, std::size_t length, const IStream::Endpoint& target) {
     if (!opened) return;
-    // Use writeTo to send to specific remote without changing default remote
-    udp.writeTo(const_cast<uint8_t*>(buffer), length, ip, port);
-}
-
-bool SongbirdUDP::getDefaultRemote(IPAddress& outIP, uint16_t& outPort) {
-    outIP = remoteIP;
-    outPort = remotePort;
-    return remotePort != 0; // Return true if we have a valid remote
+    if (bindMode && target == endpoint) {
+        write(buffer, length);
+        return;
+    }
+    udp.writeTo(const_cast<uint8_t*>(buffer), length, target.ip, target.port);
 }
 
 void SongbirdUDP::close() {

@@ -60,7 +60,7 @@ void setup() {
     Serial.print("Failed to parse remote IP string: ");
     Serial.println(remoteIP);
   }
-  udp.setRemote(remoteParsed ? remoteAddr : IPAddress(0, 0, 0, 0), remotePort);
+  udp.setEndpoint(remoteParsed ? remoteAddr : IPAddress(0, 0, 0, 0), remotePort);
   Serial.print("Remote IP: ");
   Serial.println(remoteParsed ? remoteAddr : IPAddress(0, 0, 0, 0));
   Serial.print("Remote Port: ");

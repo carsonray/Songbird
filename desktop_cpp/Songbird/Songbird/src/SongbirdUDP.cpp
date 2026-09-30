@@ -46,7 +46,7 @@ void SongbirdUDP::startAsyncReadLoop() {
         if (!ec && bytesTransferred > 0) {
             // get last remote endpoint via member
             boost::asio::ip::udp::endpoint ep = this->lastRemoteEndpoint;
-            proto->parseData(buf->data(), bytesTransferred, ep.address(), ep.port());
+            proto->parseData(buf->data(), bytesTransferred, IStream::Endpoint{ep.address(), ep.port()});
         } else if (ec) {
             std::cerr << "UDP receive error: " << ec.message() << std::endl;
         }
@@ -140,9 +140,9 @@ bool SongbirdUDP::listenMulticast(const boost::asio::ip::address& addr, uint16_t
     }
 }
 
-void SongbirdUDP::setRemote(const boost::asio::ip::address &addr, uint16_t port, bool bind) {
-    remoteIP = addr;
-    remotePort = port;
+void SongbirdUDP::setEndpoint(const boost::asio::ip::address &addr, uint16_t port, bool bind) {
+    endpoint.ip = addr;
+    endpoint.port = port;
     broadcastMode = false;
     bindMode = bind;
 
@@ -155,7 +155,7 @@ void SongbirdUDP::setRemote(const boost::asio::ip::address &addr, uint16_t port,
                 if (!socket->is_open()) socket->open(boost::asio::ip::udp::v4());
                 socket->connect(defaultRemoteEndpoint);
             } catch (std::exception &e) {
-                std::cerr << "Failed to connect socket in setRemote: " << e.what() << std::endl;
+                std::cerr << "Failed to connect socket in setEndpoint: " << e.what() << std::endl;
             }
         });
     }
@@ -165,12 +165,8 @@ void SongbirdUDP::setBroadcastMode(bool mode) {
     broadcastMode = mode;
 }
 
-boost::asio::ip::address SongbirdUDP::getRemoteIP() {
-    return remoteIP;
-}
-
-uint16_t SongbirdUDP::getRemotePort() {
-    return remotePort;
+IStream::Endpoint SongbirdUDP::getEndpoint() const {
+    return endpoint;
 }
 
 uint16_t SongbirdUDP::getLocalPort() {
@@ -209,7 +205,7 @@ void SongbirdUDP::write(const uint8_t* buffer, std::size_t length) {
         }
     } else {
         // Broadcast: send to 255.255.255.255 on remotePort if set
-        boost::asio::ip::udp::endpoint ep(boost::asio::ip::address_v4::broadcast(), remotePort);
+        boost::asio::ip::udp::endpoint ep(boost::asio::ip::address_v4::broadcast(), endpoint.port);
         socket->async_send_to(boost::asio::buffer(buffer, length), ep, [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) std::cerr << "UDP broadcast error: " << ec.message() << std::endl;
         });
@@ -220,22 +216,14 @@ bool SongbirdUDP::isOpen() const {
     return socket && socket->is_open();
 }
 
-bool SongbirdUDP::supportsRemoteWrite() const {
-    return true;
-}
-
-void SongbirdUDP::writeToRemote(const uint8_t* buffer, std::size_t length, const boost::asio::ip::address& ip, uint16_t port) {
+void SongbirdUDP::write(const uint8_t* buffer, std::size_t length, const IStream::Endpoint& target) {
     if (!isOpen()) return;
-	// Construct endpoint from given IP and port
-	boost::asio::ip::udp::endpoint endpoint(ip, port);
-    // Use writeTo to send to specific remote without changing default remote
-    socket->async_send_to(boost::asio::buffer(buffer, length), endpoint, [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
+    if (bindMode && target == endpoint) {
+        write(buffer, length);
+        return;
+    }
+	boost::asio::ip::udp::endpoint udpEndpoint(target.ip, target.port);
+    socket->async_send_to(boost::asio::buffer(buffer, length), udpEndpoint, [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
         if (ec) std::cerr << "UDP send error: " << ec.message() << std::endl;
         });
-}
-
-bool SongbirdUDP::getDefaultRemote(boost::asio::ip::address& outIP, uint16_t& outPort) {
-    outIP = remoteIP;
-    outPort = remotePort;
-    return remotePort != 0; // Return true if we have a valid remote
 }

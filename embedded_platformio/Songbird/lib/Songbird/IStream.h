@@ -5,6 +5,24 @@
 
 class IStream {
     public:
+        class Endpoint {
+        public:
+            IPAddress ip;
+            uint16_t port = 0;
+
+            bool operator==(const Endpoint& other) const {
+                return ip == other.ip && port == other.port;
+            }
+
+            bool operator!=(const Endpoint& other) const {
+                return !(*this == other);
+            }
+
+            Endpoint getDefault() const {
+                return *this;
+            }
+        };
+
         virtual ~IStream() = default;
 
         virtual void write(const uint8_t* buffer, std::size_t length);
@@ -14,17 +32,13 @@ class IStream {
         // Update/poll for new data (if applicable)
         virtual void updateData() {}
         
-        // Returns true if this stream supports dynamic remote addressing
-        virtual bool supportsRemoteWrite() const { return false; }
-        
-        // Write to a specific remote (only supported if supportsRemoteWrite() returns true)
-        virtual void writeToRemote(const uint8_t* buffer, std::size_t length, const IPAddress& ip, uint16_t port) {
-            // Default implementation ignores remote and uses normal write
+        virtual Endpoint getEndpoint() const {
+            return Endpoint{};
+        }
+
+        virtual void write(const uint8_t* buffer, std::size_t length, const Endpoint&) {
             write(buffer, length);
         }
-        
-        // Get the default remote for this stream (returns true if a default remote exists)
-        virtual bool getDefaultRemote(IPAddress& outIP, uint16_t& outPort) { return false; }
 };
 
 #endif // ISTREAM_H

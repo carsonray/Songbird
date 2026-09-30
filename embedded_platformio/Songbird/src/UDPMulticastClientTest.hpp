@@ -104,7 +104,7 @@ void setup() {
   Serial.println(multicastPort);
 
   // Sets multicast remote endpoint (for responses)
-  udp.setRemote(multicastAddr, multicastPort);
+  udp.setEndpoint(multicastAddr, multicastPort);
 }
 
 void loop() {

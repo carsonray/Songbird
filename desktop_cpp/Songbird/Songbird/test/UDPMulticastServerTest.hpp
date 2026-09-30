@@ -32,9 +32,9 @@ int main() {
 
     // Sets handler for identification messages
     core->setHeaderHandler(0x2, [&](std::shared_ptr<SongbirdCore::Packet> pkt) {
-		std::string remoteIP = pkt->getRemoteIP().to_string();
+        std::string endpointIP = pkt->getEndpoint().ip.to_string();
 		std::cout << "New multicast member at IP address "
-            << remoteIP << "\n";
+            << endpointIP << "\n";
         });
 
     // Begins multicast connection
@@ -43,7 +43,7 @@ int main() {
     }
 
     // Sets multicast remote
-	udp.setRemote(boost::asio::ip::make_address(UDP_MULTICAST_IP), UDP_MULTICAST_PORT);
+    udp.setEndpoint(boost::asio::ip::make_address(UDP_MULTICAST_IP), UDP_MULTICAST_PORT);
 
 	// Sends initial identification message
 	auto idPkt = core->createPacket(0x1);

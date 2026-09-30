@@ -30,23 +30,8 @@ class ReliableMode(Enum):
 
 
 @dataclass
-class Remote:
-    """Represents a remote endpoint."""
-    ip: str = ""
-    port: int = 0
-
-    def __hash__(self):
-        return hash((self.ip, self.port))
-
-    def __eq__(self, other):
-        if not isinstance(other, Remote):
-            return False
-        return self.ip == other.ip and self.port == other.port
-
-
-@dataclass
-class RemoteOrder:
-    """Tracks the most recent sequence number seen from a remote."""
+class EndpointOrder:
+    """Tracks the most recent sequence number seen from an endpoint."""
     expected_seq_num: int = 0
     missing_timer_active: bool = False
     missing_timer_start: float = 0.0
@@ -56,7 +41,7 @@ class RemoteOrder:
 class OutgoingInfo:
     """Tracks outgoing guaranteed packets."""
     packet: 'Packet' = None
-    remote: Remote = field(default_factory=Remote)
+    endpoint: IStream.Endpoint = field(default_factory=IStream.Endpoint)
     send_time: float = 0.0
     retransmit_count: int = 0
 
@@ -77,8 +62,7 @@ class Packet:
         self.guaranteed_flag = False
         self.payload = bytearray(payload)
         self.read_pos = 0
-        self.remote_ip = ""
-        self.remote_port = 0
+        self.endpoint = IStream.Endpoint()
 
     def to_bytes(self, mode: ProcessMode, reliable_mode: ReliableMode) -> bytes:
         """
@@ -147,22 +131,13 @@ class Packet:
         """Get the number of unread bytes in the payload."""
         return len(self.payload) - self.read_pos
 
-    def set_remote(self, ip: str, port: int) -> None:
-        """Set the remote endpoint."""
-        self.remote_ip = ip
-        self.remote_port = port
+    def set_endpoint(self, endpoint: IStream.Endpoint) -> None:
+        """Set the endpoint."""
+        self.endpoint = endpoint
 
-    def get_remote(self) -> Remote:
-        """Get the remote endpoint."""
-        return Remote(self.remote_ip, self.remote_port)
-
-    def get_remote_ip(self) -> str:
-        """Get the remote IP address."""
-        return self.remote_ip
-
-    def get_remote_port(self) -> int:
-        """Get the remote port."""
-        return self.remote_port
+    def get_endpoint(self) -> IStream.Endpoint:
+        """Get the endpoint."""
+        return self.endpoint
 
     # Writing functions
     def write_bytes(self, buffer: bytes) -> None:
@@ -281,7 +256,7 @@ class SongbirdCore:
         
         # Packet mode specific
         self.next_seq_num = 0
-        self.remote_orders: Dict[Remote, RemoteOrder] = {}
+        self.endpoint_orders: Dict[IStream.Endpoint, EndpointOrder] = {}
         self.outgoing_guaranteed: Dict[int, OutgoingInfo] = {}
         
         # Timeouts
@@ -296,15 +271,15 @@ class SongbirdCore:
         # Handlers
         self.read_handler: Optional[Callable[[Packet], None]] = None
         self.header_handlers: Dict[int, Callable[[Packet], None]] = {}
-        self.remote_handlers: Dict[Remote, Callable[[Packet], None]] = {}
+        self.endpoint_handlers: Dict[IStream.Endpoint, Callable[[Packet], None]] = {}
         
         # Wait maps
         self.header_map: Dict[int, Packet] = {}
-        self.remote_map: Dict[Remote, Packet] = {}
+        self.endpoint_map: Dict[IStream.Endpoint, Packet] = {}
         
         # Waiters
         self.header_waiters: Dict[int, List[threading.Event]] = {}
-        self.remote_waiters: Dict[Remote, List[threading.Event]] = {}
+        self.endpoint_waiters: Dict[IStream.Endpoint, List[threading.Event]] = {}
         self.waiter_packets: Dict[threading.Event, Optional[Packet]] = {}
         
         # Thread safety
@@ -338,19 +313,17 @@ class SongbirdCore:
             self.header_handlers.pop(header, None)
             self.header_map.pop(header, None)
 
-    def set_remote_handler(self, remote_ip: str, remote_port: int, 
-                          handler: Callable[[Packet], None]) -> None:
-        """Set handler for packets from specific remote."""
+    def set_endpoint_handler(self, endpoint: IStream.Endpoint,
+                             handler: Callable[[Packet], None]) -> None:
+        """Set handler for packets from a specific endpoint."""
         with self.data_lock:
-            remote = Remote(remote_ip, remote_port)
-            self.remote_handlers[remote] = handler
+            self.endpoint_handlers[endpoint] = handler
 
-    def clear_remote_handler(self, remote_ip: str, remote_port: int) -> None:
-        """Clear handler for specific remote."""
+    def clear_endpoint_handler(self, endpoint: IStream.Endpoint) -> None:
+        """Clear handler for a specific endpoint."""
         with self.data_lock:
-            remote = Remote(remote_ip, remote_port)
-            self.remote_handlers.pop(remote, None)
-            self.remote_map.pop(remote, None)
+            self.endpoint_handlers.pop(endpoint, None)
+            self.endpoint_map.pop(endpoint, None)
 
     def wait_for_header(self, header: int, timeout_ms: int = 1000) -> Optional[Packet]:
         """
@@ -396,33 +369,30 @@ class SongbirdCore:
                 return self.header_map.pop(header)
         return pkt
 
-    def wait_for_remote(self, remote_ip: str, remote_port: int, 
-                       timeout_ms: int = 1000) -> Optional[Packet]:
+    def wait_for_endpoint(self, endpoint: IStream.Endpoint,
+                          timeout_ms: int = 1000) -> Optional[Packet]:
         """
-        Wait for a packet from specific remote.
+        Wait for a packet from a specific endpoint.
         
         Args:
-            remote_ip: Remote IP address
-            remote_port: Remote port
+            endpoint: Endpoint to wait for
             timeout_ms: Timeout in milliseconds
             
         Returns:
             Packet if received, None on timeout
         """
-        remote = Remote(remote_ip, remote_port)
-        
         # Check if already available
         with self.data_lock:
-            if remote in self.remote_map:
-                pkt = self.remote_map.pop(remote)
+            if endpoint in self.endpoint_map:
+                pkt = self.endpoint_map.pop(endpoint)
                 return pkt
         
         # Register waiter
         event = threading.Event()
         with self.wait_lock:
-            if remote not in self.remote_waiters:
-                self.remote_waiters[remote] = []
-            self.remote_waiters[remote].append(event)
+            if endpoint not in self.endpoint_waiters:
+                self.endpoint_waiters[endpoint] = []
+            self.endpoint_waiters[endpoint].append(event)
             self.waiter_packets[event] = None
         
         # Wait for signal
@@ -430,18 +400,18 @@ class SongbirdCore:
         
         # Unregister waiter
         with self.wait_lock:
-            if remote in self.remote_waiters:
-                self.remote_waiters[remote].remove(event)
-                if not self.remote_waiters[remote]:
-                    del self.remote_waiters[remote]
+            if endpoint in self.endpoint_waiters:
+                self.endpoint_waiters[endpoint].remove(event)
+                if not self.endpoint_waiters[endpoint]:
+                    del self.endpoint_waiters[endpoint]
             pkt = self.waiter_packets.pop(event, None)
         
         if not got:
             return None
         
         with self.data_lock:
-            if remote in self.remote_map:
-                return self.remote_map.pop(remote)
+            if endpoint in self.endpoint_map:
+                return self.endpoint_map.pop(endpoint)
         return pkt
 
     def create_packet(self, header: int) -> Packet:
@@ -492,26 +462,17 @@ class SongbirdCore:
         
         # Convert to bytes and send
         data = packet.to_bytes(self.process_mode, self.reliable_mode)
-        remote = packet.get_remote()
-        
-        if self.stream.supports_remote_write() and remote.port != 0:
-            self.stream.write_to_remote(data, remote.ip, remote.port)
-        else:
-            self.stream.write(data)
+        endpoint = packet.get_endpoint()
+        if endpoint.port == 0:
+            endpoint = self.stream.get_endpoint().get_default()
+            packet.set_endpoint(endpoint)
+        self.stream.write_to_endpoint(data, endpoint)
         
         # Track guaranteed packets
         if guarantee_delivery and self.reliable_mode == ReliableMode.UNRELIABLE:
-            remote = packet.get_remote()
-            # Get default remote if not set
-            if self.stream.supports_remote_write() and remote.port == 0:
-                default_remote = self.stream.get_default_remote()
-                if default_remote:
-                    remote = Remote(default_remote[0], default_remote[1])
-                    packet.set_remote(remote.ip, remote.port)
-            
             info = OutgoingInfo(
                 packet=packet,
-                remote=remote,
+                endpoint=packet.get_endpoint(),
                 send_time=time.time(),
                 retransmit_count=0
             )
@@ -519,21 +480,21 @@ class SongbirdCore:
             with self.data_lock:
                 self.outgoing_guaranteed[seq_num] = info
 
-    def parse_data(self, data: bytes, remote_ip: str = "", remote_port: int = 0) -> None:
+    def parse_data(self, data: bytes, endpoint: Optional[IStream.Endpoint] = None) -> None:
         """
         Parse incoming data.
         
         Args:
             data: Received data bytes
-            remote_ip: Source IP address (for packet mode)
-            remote_port: Source port (for packet mode)
+            endpoint: Source endpoint for packet mode
         """
+        endpoint = endpoint or IStream.Endpoint()
         if self.process_mode == ProcessMode.PACKET:
             pkt = self._packet_from_data(data)
             if not pkt:
                 return
             
-            pkt.set_remote(remote_ip, remote_port)
+            pkt.set_endpoint(endpoint)
             
             # Check for ACK
             if self._check_for_ack(pkt):
@@ -541,7 +502,7 @@ class SongbirdCore:
             
             dispatch = [pkt]
             if self.reliable_mode == ReliableMode.UNRELIABLE and pkt.is_guaranteed():
-                self._update_remote_order(pkt)
+                self._update_endpoint_order(pkt)
             
             for p in dispatch:
                 self._call_handlers(p)
@@ -559,13 +520,13 @@ class SongbirdCore:
                     break
                 
                 self.last_data_time_ms = time.time() * 1000
-                pkt.set_remote(remote_ip, remote_port)
+                pkt.set_endpoint(endpoint)
                 
                 if self._check_for_ack(pkt):
                     continue
                 
                 if self.reliable_mode == ReliableMode.UNRELIABLE:
-                    self._update_remote_order(pkt)
+                    self._update_endpoint_order(pkt)
                 
                 self._call_handlers(pkt)
 
@@ -690,15 +651,15 @@ class SongbirdCore:
     def _call_handlers(self, pkt: Packet) -> None:
         """Call registered handlers for a packet."""
         header = pkt.get_header()
-        remote = pkt.get_remote()
+        endpoint = pkt.get_endpoint()
         
         # Get handlers under lock
         with self.data_lock:
             header_handler = self.header_handlers.get(header)
             self.header_map[header] = pkt
             
-            remote_handler = self.remote_handlers.get(remote)
-            self.remote_map[remote] = pkt
+            endpoint_handler = self.endpoint_handlers.get(endpoint)
+            self.endpoint_map[endpoint] = pkt
             
             global_handler = self.read_handler
         
@@ -709,32 +670,32 @@ class SongbirdCore:
                 self.waiter_packets[event] = pkt
                 event.set()
             
-            if remote in self.remote_waiters and self.remote_waiters[remote]:
-                event = self.remote_waiters[remote][0]
+            if endpoint in self.endpoint_waiters and self.endpoint_waiters[endpoint]:
+                event = self.endpoint_waiters[endpoint][0]
                 self.waiter_packets[event] = pkt
                 event.set()
         
         # Call handlers outside lock
         if header_handler:
             header_handler(pkt)
-        if remote_handler:
-            remote_handler(pkt)
+        if endpoint_handler:
+            endpoint_handler(pkt)
         if global_handler:
             global_handler(pkt)
 
-    def _update_remote_order(self, pkt: Packet) -> None:
+    def _update_endpoint_order(self, pkt: Packet) -> None:
         """Track the last sequence number used to suppress exact duplicates."""
         with self.data_lock:
             now = time.monotonic()
-            for remote, order in list(self.remote_orders.items()):
+            for endpoint, order in list(self.endpoint_orders.items()):
                 if (order.missing_timer_active and
                         (now - order.missing_timer_start) * 1000 >= self.missing_packet_timeout_ms):
-                    del self.remote_orders[remote]
-                    self.remote_map.pop(remote, None)
+                    del self.endpoint_orders[endpoint]
+                    self.endpoint_map.pop(endpoint, None)
 
-            remote = pkt.get_remote()
+            endpoint = pkt.get_endpoint()
             seq_num = pkt.get_sequence_num()
-            self.remote_orders[remote] = RemoteOrder(
+            self.endpoint_orders[endpoint] = EndpointOrder(
                 expected_seq_num=seq_num,
                 missing_timer_active=True,
                 missing_timer_start=now,
@@ -746,11 +707,11 @@ class SongbirdCore:
             return False
 
         seq_num = pkt.get_sequence_num()
-        remote = pkt.get_remote()
+        endpoint = pkt.get_endpoint()
 
         with self.data_lock:
-            if remote in self.remote_orders:
-                expected_seq = self.remote_orders[remote].expected_seq_num
+            if endpoint in self.endpoint_orders:
+                expected_seq = self.endpoint_orders[endpoint].expected_seq_num
                 # Treat any lower sequence number as a repeat relative to the last seen value.
                 # This also handles unsigned wraparound correctly in 8-bit arithmetic.
                 diff = (seq_num - expected_seq) & 0xFF
@@ -772,11 +733,10 @@ class SongbirdCore:
         # Send ACK if guaranteed
         if pkt.is_guaranteed():
             seq_num = pkt.get_sequence_num()
-            remote_ip = pkt.get_remote_ip()
-            remote_port = pkt.get_remote_port()
+            endpoint = pkt.get_endpoint()
             
             ack_pkt = Packet(0x00)
-            ack_pkt.set_remote(remote_ip, remote_port)
+            ack_pkt.set_endpoint(endpoint)
             self.send_packet(ack_pkt, guarantee_delivery=False, seq_num=seq_num)
         
         return self._is_repeat_packet(pkt)

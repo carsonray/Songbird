@@ -25,8 +25,8 @@ def main():
     
     # Set handler for identification messages
     def id_handler(pkt):
-        remote_ip = pkt.get_remote_ip()
-        print(f"New multicast member at IP address {remote_ip}")
+        endpoint_ip = pkt.get_endpoint().ip
+        print(f"New multicast member at IP address {endpoint_ip}")
     
     core.set_header_handler(0x02, id_handler)
     
@@ -38,7 +38,7 @@ def main():
     print(f"Listening on multicast group {UDP_MULTICAST_IP}:{UDP_MULTICAST_PORT}")
     
     # Set multicast remote
-    udp.set_remote(UDP_MULTICAST_IP, UDP_MULTICAST_PORT)
+    udp.set_endpoint(UDP_MULTICAST_IP, UDP_MULTICAST_PORT)
     
     # Send initial identification message
     id_pkt = core.create_packet(0x01)

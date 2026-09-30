@@ -28,6 +28,7 @@ public:
 
     // Check if the serial port is open
     bool isOpen() const override;
+    IStream::Endpoint getEndpoint() const override { return {}; }
 
     void startAsyncReadLoop();
 

@@ -37,7 +37,6 @@ public:
         peer->incoming.insert(peer->incoming.end(), buffer, buffer + length);
     }
 
-    bool supportsRemoteWrite() const override { return false; }
 
     void updateData() {
         // Reads any available data from serial stream
@@ -331,7 +330,6 @@ public:
         peer->incoming.insert(peer->incoming.end(), buffer, buffer + length);
     }
     
-    bool supportsRemoteWrite() const override { return false; }
     
     void updateData() {
         std::size_t toRead = incoming.size();

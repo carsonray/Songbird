@@ -19,18 +19,18 @@ def main():
     # Node 2: Client
     client = SongbirdUDP("Client")
     client.listen(9001)
-    client.set_remote("127.0.0.1", 9000)
+    client.set_endpoint("127.0.0.1", 9000)
     client_core = client.get_protocol()
     
     # Set up server to echo messages
     def server_handler(pkt):
         print(f"Server received: Header={hex(pkt.get_header())}, "
-              f"From={pkt.get_remote_ip()}:{pkt.get_remote_port()}")
+              f"From={pkt.get_endpoint().ip}:{pkt.get_endpoint().port}")
         
         # Echo back
         response = server_core.create_packet(pkt.get_header())
         response.write_bytes(pkt.get_payload())
-        response.set_remote(pkt.get_remote_ip(), pkt.get_remote_port())
+        response.set_endpoint(pkt.get_endpoint())
         server_core.send_packet(response)
         print("Server echoed packet back")
     

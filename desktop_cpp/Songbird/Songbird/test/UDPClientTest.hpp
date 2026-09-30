@@ -141,7 +141,7 @@ int main() {
     }
 
     // Configure remote endpoint (defaults to localhost:12345)
-    udp.setRemote(boost::asio::ip::make_address(UDP_REMOTE_ADDR), UDP_REMOTE_PORT);
+    udp.setEndpoint(boost::asio::ip::make_address(UDP_REMOTE_ADDR), UDP_REMOTE_PORT);
 
     waitForPing();
 

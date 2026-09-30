@@ -9,7 +9,7 @@ import socket
 import threading
 import logging
 import struct
-from typing import Optional, Tuple
+from typing import Optional
 
 from .istream import IStream
 from .songbird_core import SongbirdCore, ProcessMode
@@ -34,8 +34,7 @@ class SongbirdUDP(IStream):
         self.protocol.set_missing_packet_timeout(100)
         self.protocol.set_retransmission_timeout(100)
         
-        self.default_remote_ip = ""
-        self.default_remote_port = 0
+        self.endpoint = IStream.Endpoint()
         self.local_port = 0
         
         self.broadcast_mode = False
@@ -115,7 +114,7 @@ class SongbirdUDP(IStream):
             logging.error(f"UDP multicast listen error: {e}")
             return False
 
-    def set_remote(self, addr: str, port: int, bind: bool = False) -> None:
+    def set_endpoint(self, addr: str, port: int, bind: bool = False) -> None:
         """
         Set the default remote endpoint.
         
@@ -124,8 +123,7 @@ class SongbirdUDP(IStream):
             port: Remote port
             bind: If True, connect the socket to this endpoint
         """
-        self.default_remote_ip = addr
-        self.default_remote_port = port
+        self.endpoint = IStream.Endpoint(addr, port)
         self.broadcast_mode = False
         self.bind_mode = bind
         
@@ -133,7 +131,7 @@ class SongbirdUDP(IStream):
             try:
                 self.socket.connect((addr, port))
             except OSError as e:
-                logging.error(f"Failed to connect socket in set_remote: {e}")
+                logging.error(f"Failed to connect socket in set_endpoint: {e}")
 
     def set_broadcast_mode(self, mode: bool) -> None:
         """
@@ -150,13 +148,9 @@ class SongbirdUDP(IStream):
             except OSError as e:
                 logging.error(f"Failed to set broadcast mode: {e}")
 
-    def get_remote_ip(self) -> str:
-        """Get the default remote IP address."""
-        return self.default_remote_ip
-
-    def get_remote_port(self) -> int:
-        """Get the default remote port."""
-        return self.default_remote_port
+    def get_endpoint(self) -> IStream.Endpoint:
+        """Get the configured endpoint."""
+        return self.endpoint
 
     def get_local_port(self) -> int:
         """Get the local port."""
@@ -226,23 +220,14 @@ class SongbirdUDP(IStream):
                 if self.bind_mode:
                     self.socket.send(buffer)
                 else:
-                    self.socket.sendto(buffer, (self.default_remote_ip, self.default_remote_port))
+                    self.socket.sendto(buffer, (self.endpoint.ip, self.endpoint.port))
             else:
                 # Broadcast to 255.255.255.255
-                self.socket.sendto(buffer, ('<broadcast>', self.default_remote_port))
+                self.socket.sendto(buffer, ('<broadcast>', self.endpoint.port))
         except OSError as e:
             logging.error(f"UDP send error: {e}")
 
-    def supports_remote_write(self) -> bool:
-        """
-        Check if this stream supports writing to specific remotes.
-        
-        Returns:
-            True (UDP supports remote write)
-        """
-        return True
-
-    def write_to_remote(self, buffer: bytes, ip: str, port: int) -> None:
+    def write_to_endpoint(self, buffer: bytes, endpoint: IStream.Endpoint) -> None:
         """
         Write to a specific remote endpoint.
         
@@ -255,20 +240,12 @@ class SongbirdUDP(IStream):
             return
         
         try:
-            self.socket.sendto(buffer, (ip, port))
+            if self.bind_mode and endpoint == self.endpoint:
+                self.write(buffer)
+                return
+            self.socket.sendto(buffer, (endpoint.ip, endpoint.port))
         except OSError as e:
             logging.error(f"UDP send error: {e}")
-
-    def get_default_remote(self) -> Optional[Tuple[str, int]]:
-        """
-        Get the default remote endpoint.
-        
-        Returns:
-            Tuple of (ip, port) if set, None otherwise
-        """
-        if self.default_remote_port != 0:
-            return (self.default_remote_ip, self.default_remote_port)
-        return None
 
     def _prepare_socket(self, reuse_address: bool = False) -> bool:
         """
@@ -306,8 +283,8 @@ class SongbirdUDP(IStream):
             try:
                 data, addr = self.socket.recvfrom(self.ASYNC_READ_BUF)
                 if data:
-                    remote_ip, remote_port = addr
-                    self.protocol.parse_data(data, remote_ip, remote_port)
+                    endpoint_ip, endpoint_port = addr
+                    self.protocol.parse_data(data, IStream.Endpoint(endpoint_ip, endpoint_port))
             except socket.timeout:
                 # Timeout is expected for non-blocking reads
                 continue

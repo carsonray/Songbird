@@ -111,6 +111,10 @@ class SongbirdUART(IStream):
         """
         return self.serial_port is not None and self.serial_port.is_open and self.async_active
 
+    def get_endpoint(self) -> IStream.Endpoint:
+        """UART uses a placeholder endpoint because it is point-to-point."""
+        return IStream.Endpoint()
+
     def get_protocol(self) -> SongbirdCore:
         """
         Get the protocol handler.

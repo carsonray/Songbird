@@ -4,13 +4,13 @@
 #include <memory>
 #include <string>
 #include <Arduino.h>
-#include <SoftwareSerial.h>
+#include <HardwareSerial.h>
 #include "IStream.h"
 #include "SongbirdCore.h"
 
 class SongbirdUART: public IStream {
 public:
-    SongbirdUART(std::string name, SoftwareSerial& serial);
+    SongbirdUART(std::string name, Stream& serial);
     ~SongbirdUART();
 
     // Initialize and open the serial port
@@ -23,8 +23,7 @@ public:
 
     void write(const uint8_t* buffer, std::size_t length) override;
     
-    // UART does not support dynamic remote addressing (point-to-point)
-    bool supportsRemoteWrite() const override { return false; }
+    IStream::Endpoint getEndpoint() const override { return {}; }
 
     // Get the MinBiTCore protocol object
     std::shared_ptr<SongbirdCore> getProtocol();
@@ -34,7 +33,7 @@ public:
 
 private:
     std::shared_ptr<SongbirdCore> protocol;
-    SoftwareSerial* serial;
+    Stream* serial;
     bool open;
 };
 
