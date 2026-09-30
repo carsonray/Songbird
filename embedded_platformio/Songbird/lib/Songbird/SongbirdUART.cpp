@@ -1,7 +1,7 @@
 #include "SongbirdUART.h"
 
-SongbirdUART::SongbirdUART(std::string name)
-    : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM, SongbirdCore::UNRELIABLE)) {
+SongbirdUART::SongbirdUART(std::string name, SoftwareSerial& serial)
+    : protocol(std::make_shared<SongbirdCore>(name, SongbirdCore::STREAM, SongbirdCore::UNRELIABLE)), serial(&serial), open(false) {
         protocol->attachStream(this);
 }
 
@@ -10,16 +10,17 @@ SongbirdUART::~SongbirdUART() {
 }
 
 bool SongbirdUART::begin(unsigned int baudRate) {
-    Serial.begin(baudRate);
+    serial->begin(baudRate);
+    open = true;
     return true;
 }
 
 void SongbirdUART::updateData() {
     // Reads any available data from serial stream
-    std::size_t toRead = Serial.available();
-    if (Serial && toRead > 0) {
+    std::size_t toRead = serial->available();
+    if (open && toRead > 0) {
             std::vector<uint8_t> buffer(toRead);
-            std::size_t bytesRead = Serial.readBytes(buffer.data(), toRead);
+            std::size_t bytesRead = serial->readBytes(buffer.data(), toRead);
             if (bytesRead > 0) {
                 protocol->parseData(buffer.data(), bytesRead);
             }
@@ -30,11 +31,14 @@ void SongbirdUART::updateData() {
 }
 
 void SongbirdUART::close() {
-    Serial.end();
+    if (open) {
+        serial->end();
+        open = false;
+    }
 }
 
 void SongbirdUART::write(const uint8_t* buffer, std::size_t length) {
-    Serial.write(buffer, length);
+    serial->write(buffer, length);
 }
 
 std::shared_ptr<SongbirdCore> SongbirdUART::getProtocol() {
@@ -42,5 +46,5 @@ std::shared_ptr<SongbirdCore> SongbirdUART::getProtocol() {
 }
 
 bool SongbirdUART::isOpen() const {
-    return Serial;
+    return open;
 }

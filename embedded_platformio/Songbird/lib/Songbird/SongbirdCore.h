@@ -83,6 +83,8 @@ class SongbirdCore {
 
         struct RemoteOrder {
             uint8_t expectedSeqNum = 0;
+            bool missingTimerActive = false;
+            uint32_t missingTimerStartMs = 0;
         };
 
         // Custom hash functor

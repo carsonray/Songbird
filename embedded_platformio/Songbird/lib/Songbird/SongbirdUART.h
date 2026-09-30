@@ -4,12 +4,13 @@
 #include <memory>
 #include <string>
 #include <Arduino.h>
+#include <SoftwareSerial.h>
 #include "IStream.h"
 #include "SongbirdCore.h"
 
 class SongbirdUART: public IStream {
 public:
-     SongbirdUART(std::string name);
+    SongbirdUART(std::string name, SoftwareSerial& serial);
     ~SongbirdUART();
 
     // Initialize and open the serial port
@@ -33,6 +34,8 @@ public:
 
 private:
     std::shared_ptr<SongbirdCore> protocol;
+    SoftwareSerial* serial;
+    bool open;
 };
 
 #endif // MINBIT_SERIAL_NODE_H

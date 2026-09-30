@@ -445,6 +445,10 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, IPAddress 
     } else if (processMode == STREAM) {
         // Adds data to readBuffer
         appendToReadBuffer(data, length);
+        // Record byte arrival time so fragmented frames can accumulate.
+        if (length > 0) {
+            lastDataTimeMs = millis();
+        }
         // Process COBS-encoded packets in readBuffer
         while (true) {
             std::shared_ptr<Packet> pkt = packetFromStreamCOBS();
@@ -646,9 +650,23 @@ void SongbirdCore::callHandlers(std::shared_ptr<Packet> pkt) {
 void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
     Remote remote = pkt->getRemote();
     uint8_t seqNum = pkt->getSequenceNum();
+    uint32_t now = millis();
 
     SpinLockGuard guard(dataSpinlock);
-    remoteOrders[remote] = RemoteOrder{seqNum};
+    for (auto it = remoteOrders.begin(); it != remoteOrders.end();) {
+        if (it->second.missingTimerActive &&
+            static_cast<uint32_t>(now - it->second.missingTimerStartMs) >= missingPacketTimeoutMs) {
+            remoteMap.erase(it->first);
+            it = remoteOrders.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    RemoteOrder& order = remoteOrders[remote];
+    order.expectedSeqNum = seqNum;
+    order.missingTimerActive = true;
+    order.missingTimerStartMs = now;
 }
 
 bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {
@@ -767,26 +785,10 @@ void SongbirdCore::appendToReadBuffer(const uint8_t* data, std::size_t length) {
 
 void SongbirdCore::update() {
     uint32_t currentMicros = micros();
-    std::vector<Remote> expiredMissingRemotes;
     std::vector<uint8_t> expiredRetransmitSeqs;
     
     {
         SpinLockGuard guard(dataSpinlock);
-        
-        // Check for missing packet timeouts
-        for (auto& it : remoteOrders) {
-            const Remote& remote = it.first;
-            RemoteOrder& order = it.second;
-            
-            if (order.missingTimerActive) {
-                uint32_t elapsedMicros = currentMicros - order.missingTimerStartMicros;
-                uint32_t timeoutMicros = missingPacketTimeoutMs * 1000;
-                
-                if (elapsedMicros >= timeoutMicros) {
-                    expiredMissingRemotes.push_back(remote);
-                }
-            }
-        }
         
         // Check for retransmit timeouts
         for (auto& it : outgoingGuaranteed) {
@@ -802,11 +804,7 @@ void SongbirdCore::update() {
         }
     }
     
-    // Handle expired timeouts outside the lock
-    for (const Remote& remote : expiredMissingRemotes) {
-        onMissingTimeout(remote);
-    }
-    
+    // Handle expired retransmit timeouts outside the lock
     for (uint8_t seqNum : expiredRetransmitSeqs) {
         onRetransmitTimeout(seqNum);
     }

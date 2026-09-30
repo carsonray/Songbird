@@ -48,6 +48,8 @@ class Remote:
 class RemoteOrder:
     """Tracks the most recent sequence number seen from a remote."""
     expected_seq_num: int = 0
+    missing_timer_active: bool = False
+    missing_timer_start: float = 0.0
 
 
 @dataclass
@@ -723,9 +725,20 @@ class SongbirdCore:
     def _update_remote_order(self, pkt: Packet) -> None:
         """Track the last sequence number used to suppress exact duplicates."""
         with self.data_lock:
+            now = time.monotonic()
+            for remote, order in list(self.remote_orders.items()):
+                if (order.missing_timer_active and
+                        (now - order.missing_timer_start) * 1000 >= self.missing_packet_timeout_ms):
+                    del self.remote_orders[remote]
+                    self.remote_map.pop(remote, None)
+
             remote = pkt.get_remote()
             seq_num = pkt.get_sequence_num()
-            self.remote_orders[remote] = RemoteOrder(expected_seq_num=seq_num)
+            self.remote_orders[remote] = RemoteOrder(
+                expected_seq_num=seq_num,
+                missing_timer_active=True,
+                missing_timer_start=now,
+            )
 
     def _is_repeat_packet(self, pkt: Packet) -> bool:
         """Check if this guaranteed packet is an older or duplicate sequence than the latest seen."""

@@ -243,9 +243,17 @@ SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, Son
             if (missingTimerThreadStop.load()) break;
 
             auto now = steady_clock::now();
+            std::vector<Remote> expiredRemotes;
             std::vector<uint8_t> retransmitPackets;
             {
                 std::lock_guard<std::mutex> lock(dataMutex);
+                for (auto& it : remoteOrders) {
+                    RemoteOrder& order = it.second;
+                    if (order.missingTimerActive && order.missingTimerStart != steady_clock::time_point::min() &&
+                        duration_cast<milliseconds>(now - order.missingTimerStart).count() >= missingPacketTimeoutMs) {
+                        expiredRemotes.push_back(it.first);
+                    }
+                }
                 for (auto& it : outgoingGuaranteed) {
                     uint8_t seqNum = it.first;
                     OutgoingInfo& gp = it.second;
@@ -253,6 +261,14 @@ SongbirdCore::SongbirdCore(std::string name, SongbirdCore::ProcessMode mode, Son
                     if (static_cast<uint32_t>(elapsed) >= retransmissionTimeoutMs) {
                         retransmitPackets.push_back(seqNum);
                     }
+                }
+            }
+
+            if (!expiredRemotes.empty()) {
+                std::lock_guard<std::mutex> lock(dataMutex);
+                for (const Remote& remote : expiredRemotes) {
+                    remoteOrders.erase(remote);
+                    remoteMap.erase(remote);
                 }
             }
 
@@ -738,6 +754,9 @@ void SongbirdCore::updateRemoteOrder(std::shared_ptr<Packet> pkt) {
 
     // Keep the most recent sequence seen for repeat detection. Explicit reordering is no longer supported.
     it->second.expectedSeqNum = seqNum;
+    it->second.missingTimerActive = true;
+    it->second.missingTimerStart = std::chrono::steady_clock::now();
+    missingTimerCv.notify_all();
 }
 
 bool SongbirdCore::isRepeatPacket(std::shared_ptr<Packet> pkt) {

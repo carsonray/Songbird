@@ -43,6 +43,8 @@ class SongbirdCore {
 
         struct RemoteOrder {
             uint8_t expectedSeqNum = 0;
+            bool missingTimerActive = false;
+            std::chrono::steady_clock::time_point missingTimerStart = std::chrono::steady_clock::time_point::min();
         };
 
         // Custom hash functor
