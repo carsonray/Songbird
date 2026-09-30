@@ -1,7 +1,7 @@
 import math
 import time
 
-from songbird import IStream, ProcessMode, ReliableMode, SongbirdCore
+from songbird import IStream, LogEvent, Logging, ProcessMode, ReliableMode, SongbirdCore
 
 MODE = ProcessMode.PACKET
 RELIABILITY = ReliableMode.UNRELIABLE
@@ -219,11 +219,53 @@ def test_guaranteed_delivery_with_retransmit():
     assert received["packet"].get_header() == 0x50
     assert received["packet"].read_byte() == 0xAA
 
-    stream_a.update_data()
-    time.sleep(0.08)
-    core_a._on_retransmission_timeout(seq_num)
+
+def test_corrupt_unreliable_packet_is_dropped():
+    stream_a, stream_b, core_a, core_b = make_linked_cores()
+    received = []
+    core_b.set_read_handler(received.append)
+
+    packet = core_a.create_packet(0x51)
+    packet.write_byte(0xAB)
+    core_a.send_packet(packet)
+    stream_b.incoming[-1] ^= 0xFF
+
     stream_b.update_data()
-    assert receive_count["count"] == 1
+
+    assert received == []
+
+
+def test_corrupt_guaranteed_packet_triggers_nack_retransmit():
+    stream_a, stream_b, core_a, core_b = make_linked_cores()
+    received = []
+    core_b.set_read_handler(received.append)
+
+    packet = core_a.create_packet(0x52)
+    packet.write_byte(0xCD)
+    core_a.send_packet(packet, guarantee_delivery=True)
+    stream_b.incoming[-1] ^= 0xFF
+
+    stream_b.update_data()
+    stream_a.update_data()
+    stream_b.update_data()
+
+    assert len(received) == 1
+    assert received[0].get_header() == 0x52
+    assert received[0].read_byte() == 0xCD
+
+
+def test_packet_logging_filters_by_header(caplog):
+    stream_a, stream_b, core_a, core_b = make_linked_cores()
+    core_a.set_logging(Logging(events=LogEvent.SENT, header=0x53))
+    core_b.set_logging(Logging(events=LogEvent.RECEIVED, header=0x53))
+
+    with caplog.at_level("INFO"):
+        packet = core_a.create_packet(0x53)
+        core_a.send_packet(packet)
+        stream_b.update_data()
+
+    assert any("[A] SENT header=83" in record.message for record in caplog.records)
+    assert any("[B] RECEIVED header=83" in record.message for record in caplog.records)
 
 
 def test_repeat_blocking():

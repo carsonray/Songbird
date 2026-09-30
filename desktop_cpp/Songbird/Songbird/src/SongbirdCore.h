@@ -29,6 +29,26 @@ class SongbirdCore {
             RELIABLE
 		};
 
+        static constexpr uint8_t ACK_HEADER = 0x00;
+        static constexpr uint8_t NACK_CODE = 0x01;
+
+        enum LogEvent : uint8_t {
+            LOG_DROPPED = 1 << 0,
+            LOG_RETRANSMITTED = 1 << 1,
+            LOG_SENT = 1 << 2,
+            LOG_RECEIVED = 1 << 3,
+            LOG_RATE = 1 << 4
+        };
+
+        struct Logging {
+            uint8_t events = 0;
+            bool filterEndpoint = false;
+            IStream::Endpoint endpoint;
+            bool filterHeader = false;
+            uint8_t header = 0;
+            uint32_t rateIntervalMs = 1000;
+        };
+
         struct EndpointOrder {
             uint8_t expectedSeqNum = 0;
             bool missingTimerActive = false;
@@ -49,6 +69,7 @@ class SongbirdCore {
             Packet(uint8_t header);
             // Creates packet with a payload
             Packet(uint8_t header, const std::vector<uint8_t>& payload);
+            Packet(uint8_t header, const std::vector<uint8_t>& payload, bool checksumValid);
 
             // Converts packet to byte vector for transmission
             std::vector<uint8_t> toBytes(SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode) const;
@@ -59,6 +80,8 @@ class SongbirdCore {
             // Guaranteed delivery flag
             void setGuaranteed(bool guaranteed = true);
             bool isGuaranteed() const;
+            bool isChecksumValid() const;
+            bool checksumOk = true;
 
             uint8_t getHeader() const;
             uint8_t getSequenceNum() const;
@@ -141,6 +164,7 @@ class SongbirdCore {
 
         // Attaches stream object
         void attachStream(IStream* stream);
+        void setLogging(const Logging& logging);
 
         ////////////////////////////////////////////
         // Specific to packet mode
@@ -236,6 +260,18 @@ class SongbirdCore {
         // Triggers handlers based on packet
         void callHandlers(std::shared_ptr<Packet> pkt);
 
+        struct LogTrack {
+            uint32_t sent = 0;
+            uint32_t received = 0;
+        };
+
+        bool loggingMatches(const IStream::Endpoint& endpoint, uint8_t header) const;
+        void logPacket(LogEvent event, const Packet& packet, const char* reason = nullptr);
+        void logTimeout(const IStream::Endpoint& endpoint);
+        void logRatesIfDue();
+        static const char* logEventName(LogEvent event);
+        static std::string endpointString(const IStream::Endpoint& endpoint);
+
         // ACK handling
         void removeAcknowledgedPacket(uint8_t seqNum);
         bool checkForAck(std::shared_ptr<Packet> packet);
@@ -270,6 +306,11 @@ class SongbirdCore {
         // Waiter registries (per-header and per-endpoint) to support multiple concurrent waiters
         std::unordered_map<uint8_t, std::vector<std::shared_ptr<Waiter>>> headerWaiters;
         std::unordered_map<IStream::Endpoint, std::vector<std::shared_ptr<Waiter>>, EndpointHasher> endpointWaiters;
+
+        Logging logging;
+        std::unordered_map<uint8_t, LogTrack> headerLogTracks;
+        std::unordered_map<IStream::Endpoint, LogTrack, EndpointHasher> endpointLogTracks;
+        std::chrono::steady_clock::time_point logRateWindowStart = std::chrono::steady_clock::now();
 
         // Timer thread and synchronization for desktop missing-packet timeout handling
         std::thread missingTimerThread;

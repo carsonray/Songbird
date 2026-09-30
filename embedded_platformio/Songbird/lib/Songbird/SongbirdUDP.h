@@ -13,6 +13,31 @@
 
 class SongbirdUDP : public IStream {
 public:
+    class Endpoint {
+        public:
+            Endpoint() : ip(0, 0, 0, 0), port(0) {}
+            Endpoint(const IPAddress& ip, uint16_t port) : ip(ip), port(port) {}
+
+            bool operator==(const Endpoint& other) const {
+                return (ip == other.ip) && (port == other.port);
+            };
+
+            bool operator!=(const Endpoint& other) const {
+                return !(*this == other);
+            };
+
+            virtual Endpoint getDefault() const {
+                return Endpoint{IPAddress(0, 0, 0, 0), 0};
+            };
+
+            virtual std::string toString() const {
+                return ip.toString() + ":" + std::to_string(port);
+            };
+        private:
+            IPAddress ip;
+            uint16_t port;
+    };
+
     SongbirdUDP(std::string name);
     ~SongbirdUDP() override;
 
@@ -36,7 +61,7 @@ public:
     bool isMulticast();
     bool isBound();
 
-    IStream::Endpoint getEndpoint() const override;
+    Endpoint getEndpoint() const override;
     // Gets local port
     uint16_t getLocalPort();
     std::shared_ptr<SongbirdCore> getProtocol();
@@ -46,7 +71,7 @@ public:
     bool isOpen() const override;
     void close() override;
     void updateData() override { update(); }
-    void write(const uint8_t* buffer, std::size_t length, const IStream::Endpoint& endpoint) override;
+    void write(const uint8_t* buffer, std::size_t length, const Endpoint& endpoint) override;
 
 private:
     std::shared_ptr<SongbirdCore> protocol;
@@ -55,7 +80,7 @@ private:
     bool broadcastMode;
     bool multicastMode;
     bool bindMode;
-    IStream::Endpoint endpoint;
+    Endpoint endpoint;
     uint16_t localPort;
 };
 

@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, IntFlag
 from typing import Optional, Callable, Dict, List, Tuple
 from collections import deque
 import logging
@@ -27,6 +27,26 @@ class ReliableMode(Enum):
     """Reliability mode for packet delivery."""
     UNRELIABLE = "unreliable"
     RELIABLE = "reliable"
+
+
+ACK_HEADER = 0x00
+NACK_CODE = 0x01
+
+
+class LogEvent(IntFlag):
+    DROPPED = 1 << 0
+    RETRANSMITTED = 1 << 1
+    SENT = 1 << 2
+    RECEIVED = 1 << 3
+    RATE = 1 << 4
+
+
+@dataclass
+class Logging:
+    events: LogEvent = LogEvent(0)
+    endpoint: Optional[IStream.Endpoint] = None
+    header: Optional[int] = None
+    rate_interval_ms: int = 1000
 
 
 @dataclass
@@ -60,6 +80,7 @@ class Packet:
         self.header = header
         self.sequence_num = 0
         self.guaranteed_flag = False
+        self.checksum_valid = True
         self.payload = bytearray(payload)
         self.read_pos = 0
         self.endpoint = IStream.Endpoint()
@@ -84,13 +105,19 @@ class Packet:
             out.append(self.header)
         else:
             # UNRELIABLE mode: includes seq/guaranteed bytes
-            # STREAM: [header][seq][guaranteed][payload] (COBS encoded)
-            # PACKET: [header][seq][guaranteed][payload]
+            # STREAM: [header][seq][guaranteed][payload][checksum] (COBS encoded)
+            # PACKET: [header][seq][guaranteed][payload][checksum]
             out.append(self.header)
             out.append(self.sequence_num & 0xFF)
             out.append(1 if self.guaranteed_flag else 0)
 
         out.extend(self.payload)
+
+        if reliable_mode == ReliableMode.UNRELIABLE:
+            checksum = 0
+            for byte in out:
+                checksum ^= byte
+            out.append(checksum)
         
         # Apply COBS encoding in STREAM mode
         if mode == ProcessMode.STREAM:
@@ -110,6 +137,10 @@ class Packet:
     def is_guaranteed(self) -> bool:
         """Check if guaranteed delivery is enabled."""
         return self.guaranteed_flag
+
+    def is_checksum_valid(self) -> bool:
+        """Return whether the received unreliable-frame checksum was valid."""
+        return self.checksum_valid
 
     def get_header(self) -> int:
         """Get the packet header."""
@@ -281,6 +312,11 @@ class SongbirdCore:
         self.header_waiters: Dict[int, List[threading.Event]] = {}
         self.endpoint_waiters: Dict[IStream.Endpoint, List[threading.Event]] = {}
         self.waiter_packets: Dict[threading.Event, Optional[Packet]] = {}
+
+        self.logging = Logging()
+        self.header_log_tracks: Dict[int, Dict[str, int]] = {}
+        self.endpoint_log_tracks: Dict[IStream.Endpoint, Dict[str, int]] = {}
+        self.log_rate_window_start = time.monotonic()
         
         # Thread safety
         self.data_lock = threading.RLock()
@@ -293,6 +329,81 @@ class SongbirdCore:
     def attach_stream(self, stream: IStream) -> None:
         """Attach a stream for communication."""
         self.stream = stream
+
+    def set_logging(self, logging_config: Logging) -> None:
+        """Configure packet event and packets-per-second logging."""
+        with self.data_lock:
+            self.logging = logging_config
+            self.header_log_tracks.clear()
+            self.endpoint_log_tracks.clear()
+            self.log_rate_window_start = time.monotonic()
+
+    def _logging_matches(self, endpoint: IStream.Endpoint, header: int) -> bool:
+        return ((self.logging.endpoint is None or self.logging.endpoint == endpoint) and
+                (self.logging.header is None or self.logging.header == header))
+
+    @staticmethod
+    def _endpoint_text(endpoint: IStream.Endpoint) -> str:
+        return f"{endpoint.ip}:{endpoint.port}"
+
+    def _log_packet(self, event: LogEvent, packet: Packet, reason: Optional[str] = None) -> None:
+        should_log = False
+        rate_enabled = False
+        with self.data_lock:
+            if not self._logging_matches(packet.get_endpoint(), packet.get_header()):
+                return
+
+            header_track = self.header_log_tracks.setdefault(
+                packet.get_header(), {"sent": 0, "received": 0})
+            endpoint_track = self.endpoint_log_tracks.setdefault(
+                packet.get_endpoint(), {"sent": 0, "received": 0})
+            if event == LogEvent.SENT:
+                header_track["sent"] += 1
+                endpoint_track["sent"] += 1
+            elif event == LogEvent.RECEIVED:
+                header_track["received"] += 1
+                endpoint_track["received"] += 1
+
+            should_log = bool(self.logging.events & event)
+            if should_log:
+                suffix = f" reason={reason}" if reason else ""
+                logging.info(
+                    "[%s] %s header=%d seq=%d guaranteed=%d payload=%d endpoint=%s%s",
+                    self.name, event.name, packet.get_header(), packet.get_sequence_num(),
+                    int(packet.is_guaranteed()), packet.get_payload_length(),
+                    self._endpoint_text(packet.get_endpoint()), suffix)
+            rate_enabled = bool(self.logging.events & LogEvent.RATE)
+
+        if should_log or rate_enabled:
+            self._log_rates_if_due()
+
+    def _log_timeout(self, endpoint: IStream.Endpoint) -> None:
+        with self.data_lock:
+            if (not self.logging.events & LogEvent.DROPPED or
+                    self.logging.endpoint is not None and self.logging.endpoint != endpoint or
+                    self.logging.header is not None):
+                return
+            logging.info("[%s] DROPPED header=? seq=? guaranteed=? payload=? endpoint=%s reason=timeout",
+                         self.name, self._endpoint_text(endpoint))
+
+    def _log_rates_if_due(self) -> None:
+        with self.data_lock:
+            if not self.logging.events & LogEvent.RATE or self.logging.rate_interval_ms <= 0:
+                return
+            elapsed = time.monotonic() - self.log_rate_window_start
+            if elapsed * 1000 < self.logging.rate_interval_ms:
+                return
+            for header, track in self.header_log_tracks.items():
+                logging.info("[%s] RATE header=%d sent=%d received=%d pps=%.2f",
+                             self.name, header, track["sent"], track["received"],
+                             (track["sent"] + track["received"]) / elapsed)
+            for endpoint, track in self.endpoint_log_tracks.items():
+                logging.info("[%s] RATE endpoint=%s sent=%d received=%d pps=%.2f",
+                             self.name, self._endpoint_text(endpoint), track["sent"],
+                             track["received"], (track["sent"] + track["received"]) / elapsed)
+            self.header_log_tracks.clear()
+            self.endpoint_log_tracks.clear()
+            self.log_rate_window_start = time.monotonic()
 
     def set_read_handler(self, handler: Callable[[Packet], None]) -> None:
         """Set global read handler for all packets."""
@@ -467,6 +578,7 @@ class SongbirdCore:
             endpoint = self.stream.get_endpoint().get_default()
             packet.set_endpoint(endpoint)
         self.stream.write_to_endpoint(data, endpoint)
+        self._log_packet(LogEvent.SENT, packet)
         
         # Track guaranteed packets
         if guarantee_delivery and self.reliable_mode == ReliableMode.UNRELIABLE:
@@ -495,6 +607,18 @@ class SongbirdCore:
                 return
             
             pkt.set_endpoint(endpoint)
+
+            if not pkt.is_checksum_valid():
+                self._log_packet(LogEvent.DROPPED, pkt, "checksum")
+                if pkt.is_guaranteed():
+                    nack_pkt = Packet(ACK_HEADER)
+                    nack_pkt.set_endpoint(endpoint)
+                    nack_pkt.write_byte(NACK_CODE)
+                    self.send_packet(nack_pkt, guarantee_delivery=False,
+                                     seq_num=pkt.get_sequence_num())
+                return
+
+            self._log_packet(LogEvent.RECEIVED, pkt)
             
             # Check for ACK
             if self._check_for_ack(pkt):
@@ -516,11 +640,24 @@ class SongbirdCore:
                 if not pkt:
                     current_time_ms = time.time() * 1000
                     if current_time_ms - self.last_data_time_ms > self.missing_packet_timeout_ms:
+                        self._log_timeout(endpoint)
                         self.flush()
                     break
                 
                 self.last_data_time_ms = time.time() * 1000
                 pkt.set_endpoint(endpoint)
+
+                if not pkt.is_checksum_valid():
+                    self._log_packet(LogEvent.DROPPED, pkt, "checksum")
+                    if pkt.is_guaranteed():
+                        nack_pkt = Packet(ACK_HEADER)
+                        nack_pkt.set_endpoint(endpoint)
+                        nack_pkt.write_byte(NACK_CODE)
+                        self.send_packet(nack_pkt, guarantee_delivery=False,
+                                         seq_num=pkt.get_sequence_num())
+                    continue
+
+                self._log_packet(LogEvent.RECEIVED, pkt)
                 
                 if self._check_for_ack(pkt):
                     continue
@@ -540,18 +677,23 @@ class SongbirdCore:
             payload = data[1:] if len(data) > 1 else b""
             return Packet(header, payload)
         else:
-            # UNRELIABLE: [header][seq][guaranteed][payload]
+            # UNRELIABLE: [header][seq][guaranteed][payload][checksum]
             if len(data) < 3:
                 return None
             header = data[0]
             seq_num = data[1]
             guaranteed = data[2]
-            payload = data[3:] if len(data) > 3 else b""
+            checksum = 0
+            for byte in data[:-1]:
+                checksum ^= byte
+            checksum_valid = len(data) >= 4 and checksum == data[-1]
+            payload = data[3:-1] if len(data) > 4 else b""
             
             pkt = Packet(header, payload)
             pkt.set_sequence_num(seq_num)
             if guaranteed:
                 pkt.set_guaranteed()
+            pkt.checksum_valid = checksum_valid
             return pkt
 
     def _packet_from_stream(self) -> Optional[Packet]:
@@ -575,14 +717,14 @@ class SongbirdCore:
                 del self.read_buffer[:2 + payload_len]
                 return pkt
             else:
-                # UNRELIABLE: [header][length][seq][guaranteed][payload]
+                # UNRELIABLE: [header][length][seq][guaranteed][payload][checksum]
                 if self.new_packet:
                     if len(self.read_buffer) < 4:
                         return None
                     self.new_packet = False
                 
                 payload_len = self.read_buffer[1]
-                if len(self.read_buffer) < 4 + payload_len:
+                if len(self.read_buffer) < 5 + payload_len:
                     return None
                 
                 self.new_packet = True
@@ -590,13 +732,18 @@ class SongbirdCore:
                 seq_num = self.read_buffer[2]
                 guaranteed = self.read_buffer[3]
                 payload = bytes(self.read_buffer[4:4 + payload_len])
+                received_checksum = self.read_buffer[4 + payload_len]
+                checksum = 0
+                for byte in self.read_buffer[:4 + payload_len]:
+                    checksum ^= byte
                 
                 pkt = Packet(header, payload)
                 pkt.set_sequence_num(seq_num)
                 if guaranteed:
                     pkt.set_guaranteed()
+                pkt.checksum_valid = checksum == received_checksum
                 
-                del self.read_buffer[:4 + payload_len]
+                del self.read_buffer[:5 + payload_len]
                 return pkt
 
     def _packet_from_stream_cobs(self) -> Optional[Packet]:
@@ -634,18 +781,23 @@ class SongbirdCore:
                 payload = decoded[1:] if len(decoded) > 1 else b""
                 return Packet(header, payload)
             else:
-                # UNRELIABLE: [header][seq][guaranteed][payload]
+                # UNRELIABLE: [header][seq][guaranteed][payload][checksum]
                 if len(decoded) < 3:
                     return None
                 header = decoded[0]
                 seq_num = decoded[1]
                 guaranteed = decoded[2]
-                payload = decoded[3:] if len(decoded) > 3 else b""
+                checksum = 0
+                for byte in decoded[:-1]:
+                    checksum ^= byte
+                checksum_valid = len(decoded) >= 4 and checksum == decoded[-1]
+                payload = decoded[3:-1] if len(decoded) > 4 else b""
                 
                 pkt = Packet(header, payload)
                 pkt.set_sequence_num(seq_num)
                 if guaranteed:
                     pkt.set_guaranteed()
+                pkt.checksum_valid = checksum_valid
                 return pkt
 
     def _call_handlers(self, pkt: Packet) -> None:
@@ -724,10 +876,13 @@ class SongbirdCore:
         if self.reliable_mode != ReliableMode.UNRELIABLE:
             return False
         
-        # Check if this is an ACK packet
-        if pkt.get_header() == 0x00:
+        # Check if this is an ACK or NACK packet
+        if pkt.get_header() == ACK_HEADER:
             ack_seq = pkt.get_sequence_num()
-            self._remove_acknowledged_packet(ack_seq)
+            if pkt.get_payload_length() > 0 and pkt.get_payload()[0] == NACK_CODE:
+                self._on_retransmission_timeout(ack_seq)
+            else:
+                self._remove_acknowledged_packet(ack_seq)
             return True
         
         # Send ACK if guaranteed
@@ -763,6 +918,7 @@ class SongbirdCore:
                     info.send_time = time.time()
         
         if need_resend and info:
+            self._log_packet(LogEvent.RETRANSMITTED, info.packet)
             self.send_packet(info.packet, guarantee_delivery=False, seq_num=info.packet.get_sequence_num())
 
     def flush(self) -> None:

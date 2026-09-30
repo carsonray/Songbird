@@ -6,7 +6,7 @@ both UDP and UART transport layers with reliable and unreliable delivery modes.
 """
 
 from .istream import IStream
-from .songbird_core import SongbirdCore, Packet, ProcessMode, ReliableMode
+from .songbird_core import SongbirdCore, Packet, ProcessMode, ReliableMode, Logging, LogEvent
 from .songbird_uart import SongbirdUART
 from .songbird_udp import SongbirdUDP
 
@@ -17,6 +17,8 @@ __all__ = [
     "Packet",
     "ProcessMode",
     "ReliableMode",
+    "Logging",
+    "LogEvent",
     "SongbirdUART",
     "SongbirdUDP",
 ]

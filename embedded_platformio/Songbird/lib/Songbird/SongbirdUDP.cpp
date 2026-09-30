@@ -40,8 +40,7 @@ bool SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
 
 bool SongbirdUDP::setEndpoint(const IPAddress &addr, uint16_t port, bool bind) {
     // Attempts to connect to remote
-    endpoint.ip = addr;
-    endpoint.port = port;
+    endpoint = new Endpoint(addr, port);
     broadcastMode = false;
     bindMode = bind;
     if (bind) {

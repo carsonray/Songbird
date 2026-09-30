@@ -15,9 +15,8 @@ class IStream(ABC):
     @dataclass(frozen=True)
     class Endpoint:
         """Address understood by a concrete stream."""
-        ip: str = ""
-        port: int = 0
 
+        @abstractmethod
         def get_default(self) -> "IStream.Endpoint":
             return self
 

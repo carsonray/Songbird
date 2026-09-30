@@ -159,8 +159,8 @@ core.send_packet(pkt)
 ### Packet Structure
 
 #### UNRELIABLE Mode (default):
-- **STREAM**: `[header][length][seq][guaranteed][payload]`
-- **PACKET**: `[header][seq][guaranteed][payload]`
+- **STREAM**: `[header][length][seq][guaranteed][payload][checksum]`
+- **PACKET**: `[header][seq][guaranteed][payload][checksum]`
 
 #### RELIABLE Mode:
 - **STREAM**: `[header][length][payload]`

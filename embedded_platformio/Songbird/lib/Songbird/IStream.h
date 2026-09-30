@@ -7,20 +7,13 @@ class IStream {
     public:
         class Endpoint {
         public:
-            IPAddress ip;
-            uint16_t port = 0;
+            virtual bool operator==(const Endpoint& other) const;
 
-            bool operator==(const Endpoint& other) const {
-                return ip == other.ip && port == other.port;
-            }
+            virtual bool operator!=(const Endpoint& other) const;
 
-            bool operator!=(const Endpoint& other) const {
-                return !(*this == other);
-            }
+            virtual Endpoint getDefault() const;
 
-            Endpoint getDefault() const {
-                return *this;
-            }
+            virtual std::string toString() const;
         };
 
         virtual ~IStream() = default;

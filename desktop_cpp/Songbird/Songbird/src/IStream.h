@@ -2,25 +2,19 @@
 #define ISTREAM_H
 
 #include <boost/asio.hpp>
+#include <string>
 
 class IStream {
 public:
     class Endpoint {
     public:
-        boost::asio::ip::address ip;
-        uint16_t port = 0;
+        virtual bool operator==(const Endpoint& other);
 
-        bool operator==(const Endpoint& other) const {
-            return ip == other.ip && port == other.port;
-        }
+        virtual bool operator!=(const Endpoint& other);
 
-        bool operator!=(const Endpoint& other) const {
-            return !(*this == other);
-        }
+        virtual Endpoint getDefault();
 
-        Endpoint getDefault() const {
-            return *this;
-        }
+        virtual std::string toString();
     };
 
     virtual ~IStream() = default;

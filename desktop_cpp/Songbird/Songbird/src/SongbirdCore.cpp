@@ -15,6 +15,10 @@ SongbirdCore::Packet::Packet(uint8_t header, const std::vector<uint8_t>& payload
     : header(header), sequenceNum(0), guaranteedFlag(false), payloadLength(payload.size()), payload(payload), readPos(0) {
 }
 
+SongbirdCore::Packet::Packet(uint8_t header, const std::vector<uint8_t>& payload, bool checksumOk)
+    : header(header), sequenceNum(0), guaranteedFlag(false), checksumOk(checksumOk), payloadLength(payload.size()), payload(payload), readPos(0) {
+}
+
 std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mode, SongbirdCore::ReliableMode reliableMode) const {
     std::vector<uint8_t> out;
 
@@ -27,9 +31,9 @@ std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mod
     }
     else {
         // UNRELIABLE mode: includes seq/guaranteed bytes
-        // STREAM: [header][seq][guaranteed][payload] (COBS encoded)
-        // PACKET: [header][seq][guaranteed][payload]
-        out.reserve(3 + payloadLength);
+        // STREAM: [header][seq][guaranteed][payload][checksum] (COBS encoded)
+        // PACKET: [header][seq][guaranteed][payload][checksum]
+        out.reserve(4 + payloadLength);
         out.push_back(header);
         out.push_back(sequenceNum);
         out.push_back(guaranteedFlag ? 1 : 0);
@@ -37,6 +41,12 @@ std::vector<uint8_t> SongbirdCore::Packet::toBytes(SongbirdCore::ProcessMode mod
 
     if (!payload.empty()) {
         out.insert(out.end(), payload.begin(), payload.end());
+    }
+
+    if (reliableMode == SongbirdCore::UNRELIABLE) {
+        uint8_t checksum = 0;
+        for (uint8_t byte : out) checksum ^= byte;
+        out.push_back(checksum);
     }
     
     // Apply COBS encoding in STREAM mode
@@ -59,6 +69,10 @@ void SongbirdCore::Packet::setGuaranteed(bool guaranteed) {
 
 bool SongbirdCore::Packet::isGuaranteed() const {
     return guaranteedFlag;
+}
+
+bool SongbirdCore::Packet::isChecksumValid() const {
+    return checksumOk;
 }
 
 uint8_t SongbirdCore::Packet::getHeader() const {
@@ -280,6 +294,96 @@ void SongbirdCore::attachStream(IStream* stream) {
     this->stream = stream;
 }
 
+void SongbirdCore::setLogging(const Logging& value) {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    logging = value;
+    headerLogTracks.clear();
+    endpointLogTracks.clear();
+    logRateWindowStart = std::chrono::steady_clock::now();
+}
+
+bool SongbirdCore::loggingMatches(const IStream::Endpoint& endpoint, uint8_t header) const {
+    return (!logging.filterEndpoint || endpoint == logging.endpoint) &&
+           (!logging.filterHeader || header == logging.header);
+}
+
+const char* SongbirdCore::logEventName(LogEvent event) {
+    switch (event) {
+    case LOG_DROPPED: return "DROPPED";
+    case LOG_RETRANSMITTED: return "RETRANSMITTED";
+    case LOG_SENT: return "SENT";
+    case LOG_RECEIVED: return "RECEIVED";
+    default: return "UNKNOWN";
+    }
+}
+
+std::string SongbirdCore::endpointString(const IStream::Endpoint& endpoint) {
+    return endpoint.ip.to_string() + ":" + std::to_string(endpoint.port);
+}
+
+void SongbirdCore::logPacket(LogEvent event, const Packet& packet, const char* reason) {
+    bool shouldLog = false;
+    bool rateEnabled = false;
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+        if (!loggingMatches(packet.getEndpoint(), packet.getHeader())) return;
+
+        LogTrack& headerTrack = headerLogTracks[packet.getHeader()];
+        LogTrack& endpointTrack = endpointLogTracks[packet.getEndpoint()];
+        if (event == LOG_SENT) {
+            ++headerTrack.sent;
+            ++endpointTrack.sent;
+        } else if (event == LOG_RECEIVED) {
+            ++headerTrack.received;
+            ++endpointTrack.received;
+        }
+
+        shouldLog = logging.events & event;
+        rateEnabled = logging.events & LOG_RATE;
+        if (shouldLog) {
+            std::cerr << "[" << name << "] " << logEventName(event)
+                      << " header=" << static_cast<unsigned>(packet.getHeader())
+                      << " seq=" << static_cast<unsigned>(packet.getSequenceNum())
+                      << " guaranteed=" << (packet.isGuaranteed() ? 1 : 0)
+                      << " payload=" << packet.getPayloadLength()
+                      << " endpoint=" << endpointString(packet.getEndpoint());
+            if (reason) std::cerr << " reason=" << reason;
+            std::cerr << "\n";
+        }
+    }
+    if (shouldLog || rateEnabled) logRatesIfDue();
+}
+
+void SongbirdCore::logTimeout(const IStream::Endpoint& endpoint) {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    if (!(logging.events & LOG_DROPPED) ||
+        (logging.filterEndpoint && !(endpoint == logging.endpoint)) || logging.filterHeader) return;
+    std::cerr << "[" << name << "] DROPPED header=? seq=? guaranteed=? payload=? endpoint="
+              << endpointString(endpoint) << " reason=timeout\n";
+}
+
+void SongbirdCore::logRatesIfDue() {
+    std::lock_guard<std::mutex> lock(dataMutex);
+    if (!(logging.events & LOG_RATE) || logging.rateIntervalMs == 0) return;
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - logRateWindowStart).count();
+    if (elapsed < logging.rateIntervalMs) return;
+    double seconds = elapsed / 1000.0;
+    for (const auto& entry : headerLogTracks) {
+        std::cerr << "[" << name << "] RATE header=" << static_cast<unsigned>(entry.first)
+                  << " sent=" << entry.second.sent << " received=" << entry.second.received
+                  << " pps=" << ((entry.second.sent + entry.second.received) / seconds) << "\n";
+    }
+    for (const auto& entry : endpointLogTracks) {
+        std::cerr << "[" << name << "] RATE endpoint=" << endpointString(entry.first)
+                  << " sent=" << entry.second.sent << " received=" << entry.second.received
+                  << " pps=" << ((entry.second.sent + entry.second.received) / seconds) << "\n";
+    }
+    headerLogTracks.clear();
+    endpointLogTracks.clear();
+    logRateWindowStart = std::chrono::steady_clock::now();
+}
+
 void SongbirdCore::setReadHandler(ReadHandler handler) {
     std::lock_guard<std::mutex> lock(dataMutex);
     readHandler = std::move(handler);
@@ -446,6 +550,7 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guarante
         packet.setEndpoint(endpoint);
     }
     stream->write(bytes.data(), bytes.size(), endpoint);
+    logPacket(LOG_SENT, packet);
 
     // Track guaranteed packets and start retransmit timer in both modes
     if (guaranteeDelivery && reliableMode == UNRELIABLE) {
@@ -473,6 +578,18 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, const IStr
         if (!pkt) return;
         pkt->setEndpoint(endpoint);
 
+        if (!pkt->isChecksumValid()) {
+            logPacket(LOG_DROPPED, *pkt, "checksum");
+            if (pkt->isGuaranteed()) {
+                Packet nackPkt(ACK_HEADER);
+                nackPkt.setEndpoint(endpoint);
+                nackPkt.writeByte(NACK_CODE);
+                sendPacket(nackPkt, pkt->getSequenceNum(), false);
+            }
+            return;
+        }
+        logPacket(LOG_RECEIVED, *pkt);
+
         // Check for ACK and handle guaranteed delivery before buffering/dispatching
         // This ensures ACKs are sent immediately even if packet gets bufffered as out-of-order
         if (checkForAck(pkt)) {
@@ -498,12 +615,25 @@ void SongbirdCore::parseData(const uint8_t* data, std::size_t length, const IStr
             if (!pkt) {
                 if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() - lastDataTimeMs > missingPacketTimeoutMs) {
                     // Timeout: clear read buffer to avoid stale data
+                    logTimeout(endpoint);
                     flush();
                 }
                 break;
             }
             lastDataTimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
             pkt->setEndpoint(endpoint);
+
+            if (!pkt->isChecksumValid()) {
+                logPacket(LOG_DROPPED, *pkt, "checksum");
+                if (pkt->isGuaranteed()) {
+                    Packet nackPkt(ACK_HEADER);
+                    nackPkt.setEndpoint(endpoint);
+                    nackPkt.writeByte(NACK_CODE);
+                    sendPacket(nackPkt, pkt->getSequenceNum(), false);
+                }
+                continue;
+            }
+            logPacket(LOG_RECEIVED, *pkt);
 
             // Check for ACK and handle guaranteed delivery
             if (checkForAck(pkt)) {
@@ -534,19 +664,22 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromData(const uint8_t
         pkt = std::make_shared<Packet>(currHeader, payload);
     }
     else {
-        // UNRELIABLE mode: [header][seq][guaranteed][payload]
+        // UNRELIABLE mode: [header][seq][guaranteed][payload][checksum]
         if (length < 3) return pkt;
         uint8_t currHeader = data[0];
         uint8_t currSeqNum = data[1];
         // For packet mode, third byte may be guaranteed flag
         size_t payloadOffset = 3;
         uint8_t guaranteed = data[2];
-        // payload length is implicit: consume all remaining data
+        uint8_t checksum = 0;
+        for (size_t i = 0; i + 1 < length; ++i) checksum ^= data[i];
+        bool checksumValid = length >= 4 && checksum == data[length - 1];
+        // payload excludes the trailing checksum
         std::vector<uint8_t> payload;
-        if (length > payloadOffset) {
-            payload.insert(payload.end(), data + payloadOffset, data + length);
+        if (length > payloadOffset + 1) {
+            payload.insert(payload.end(), data + payloadOffset, data + length - 1);
         }
-        pkt = std::make_shared<Packet>(currHeader, payload);
+        pkt = std::make_shared<Packet>(currHeader, payload, checksumValid);
         pkt->setSequenceNum(currSeqNum);
         if (guaranteed) pkt->setGuaranteed();
     }
@@ -591,16 +724,19 @@ std::shared_ptr<SongbirdCore::Packet> SongbirdCore::packetFromStreamCOBS() {
         }
         pkt = std::make_shared<Packet>(currHeader, payload);
     } else {
-        // UNRELIABLE: [header][seq][guaranteed][payload]
+        // UNRELIABLE: [header][seq][guaranteed][payload][checksum]
         if (decoded.size() < 3) return pkt;
         uint8_t currHeader = decoded[0];
         uint8_t currSeqNum = decoded[1];
         uint8_t guaranteed = decoded[2];
         std::vector<uint8_t> payload;
-        if (decoded.size() > 3) {
-            payload.insert(payload.end(), decoded.begin() + 3, decoded.end());
+        uint8_t checksum = 0;
+        for (size_t i = 0; i + 1 < decoded.size(); ++i) checksum ^= decoded[i];
+        bool checksumValid = decoded.size() >= 4 && checksum == decoded.back();
+        if (decoded.size() > 4) {
+            payload.insert(payload.end(), decoded.begin() + 3, decoded.end() - 1);
         }
-        pkt = std::make_shared<Packet>(currHeader, payload);
+        pkt = std::make_shared<Packet>(currHeader, payload, checksumValid);
         pkt->setSequenceNum(currSeqNum);
         if (guaranteed) pkt->setGuaranteed();
     }
@@ -763,10 +899,14 @@ bool SongbirdCore::checkForAck(std::shared_ptr<Packet> pkt) {
     }
 
     // Check if this is an ACK packet (header 0x00)
-    if (pkt->getHeader() == 0x00) {
+    if (pkt->getHeader() == ACK_HEADER) {
         // This is an ACK packet - remove the acknowledged packet from retransmit queue
         uint8_t ackSeq = pkt->getSequenceNum();
-        removeAcknowledgedPacket(ackSeq);
+        if (pkt->getPayloadLength() > 0 && pkt->peekByte() == NACK_CODE) {
+            onRetransmissionTimeout(ackSeq);
+        } else {
+            removeAcknowledgedPacket(ackSeq);
+        }
         return true; // ACK handled, don't dispatch to handlers
     }
 
@@ -821,6 +961,7 @@ void SongbirdCore::onRetransmissionTimeout(uint8_t seqNum) {
     }
 
     if (needsResend) {
+        logPacket(LOG_RETRANSMITTED, *info.packet);
         // Resend packet
         sendPacket(*info.packet.get(), info.packet->getSequenceNum(), false);
     }
