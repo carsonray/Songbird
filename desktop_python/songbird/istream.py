@@ -16,9 +16,8 @@ class IStream(ABC):
     class Endpoint:
         """Address understood by a concrete stream."""
 
-        @abstractmethod
-        def get_default(self) -> "IStream.Endpoint":
-            return self
+        def to_string(self) -> str:
+            return ""
 
     @abstractmethod
     def write(self, buffer: bytes) -> None:

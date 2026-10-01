@@ -2,18 +2,29 @@
 #define ISTREAM_H
 
 #include <Arduino.h>
+#include <utility>
 
 class IStream {
     public:
         class Endpoint {
         public:
-            virtual bool operator==(const Endpoint& other) const;
+            Endpoint() = default;
+            explicit Endpoint(std::string value) : value(std::move(value)) {}
 
-            virtual bool operator!=(const Endpoint& other) const;
+            bool operator==(const Endpoint& other) const {
+                return value == other.value;
+            }
 
-            virtual Endpoint getDefault() const;
+            bool operator!=(const Endpoint& other) const {
+                return !(*this == other);
+            }
 
-            virtual std::string toString() const;
+            std::string toString() const {
+                return value;
+            }
+
+        private:
+            std::string value;
         };
 
         virtual ~IStream() = default;

@@ -344,7 +344,7 @@ class SongbirdCore:
 
     @staticmethod
     def _endpoint_text(endpoint: IStream.Endpoint) -> str:
-        return f"{endpoint.ip}:{endpoint.port}"
+        return endpoint.to_string()
 
     def _log_packet(self, event: LogEvent, packet: Packet, reason: Optional[str] = None) -> None:
         should_log = False
@@ -574,8 +574,8 @@ class SongbirdCore:
         # Convert to bytes and send
         data = packet.to_bytes(self.process_mode, self.reliable_mode)
         endpoint = packet.get_endpoint()
-        if endpoint.port == 0:
-            endpoint = self.stream.get_endpoint().get_default()
+        if endpoint == IStream.Endpoint():
+            endpoint = self.stream.get_endpoint()
             packet.set_endpoint(endpoint)
         self.stream.write_to_endpoint(data, endpoint)
         self._log_packet(LogEvent.SENT, packet)

@@ -11,6 +11,20 @@
 
 class SongbirdUDP : public IStream {
 public:
+    class Endpoint : public IStream::Endpoint {
+    public:
+        Endpoint() : IStream::Endpoint(), ip(), port(0) {}
+        Endpoint(const boost::asio::ip::address& ip, uint16_t port)
+            : IStream::Endpoint(ip.to_string() + ":" + std::to_string(port)), ip(ip), port(port) {}
+
+        std::string toString() const {
+            return IStream::Endpoint::toString();
+        }
+
+        boost::asio::ip::address ip;
+        uint16_t port;
+    };
+
     SongbirdUDP(std::string name);
     ~SongbirdUDP();
 
@@ -54,7 +68,7 @@ private:
     std::shared_ptr<SongbirdCore> protocol;
     bool broadcastMode{false};
     bool multicastMode{false};
-    IStream::Endpoint endpoint;
+    Endpoint endpoint;
     uint16_t localPort{0};
 
     // If true, socket is connected to remote and write should use send (no endpoint)

@@ -9,6 +9,7 @@ import socket
 import threading
 import logging
 import struct
+from dataclasses import dataclass
 from typing import Optional
 
 from .istream import IStream
@@ -34,7 +35,7 @@ class SongbirdUDP(IStream):
         self.protocol.set_missing_packet_timeout(100)
         self.protocol.set_retransmission_timeout(100)
         
-        self.endpoint = IStream.Endpoint()
+        self.endpoint = self.Endpoint()
         self.local_port = 0
         
         self.broadcast_mode = False
@@ -123,7 +124,7 @@ class SongbirdUDP(IStream):
             port: Remote port
             bind: If True, connect the socket to this endpoint
         """
-        self.endpoint = IStream.Endpoint(addr, port)
+        self.endpoint = self.Endpoint(addr, port)
         self.broadcast_mode = False
         self.bind_mode = bind
         
@@ -151,6 +152,14 @@ class SongbirdUDP(IStream):
     def get_endpoint(self) -> IStream.Endpoint:
         """Get the configured endpoint."""
         return self.endpoint
+
+    @dataclass(frozen=True)
+    class Endpoint(IStream.Endpoint):
+        ip: str = ""
+        port: int = 0
+
+        def to_string(self) -> str:
+            return f"{self.ip}:{self.port}" if self.ip else ""
 
     def get_local_port(self) -> int:
         """Get the local port."""

@@ -58,8 +58,7 @@ class SongbirdCore {
         // Custom hash functor
         struct EndpointHasher {
             size_t operator()(IStream::Endpoint const& endpoint) const noexcept {
-                // combine ip and port into a size_t
-                return std::hash<std::string>()(endpoint.ip.to_string()) ^ (static_cast<size_t>(endpoint.port) << 1);
+                return std::hash<std::string>()(endpoint.toString());
             }
         };
 
@@ -90,7 +89,6 @@ class SongbirdCore {
             std::size_t getRemainingBytes() const;
 
             // Endpoint info (for server mode responses)
-            void setEndpoint(const boost::asio::ip::address &ip, uint16_t port);
             void setEndpoint(const IStream::Endpoint& endpoint);
             IStream::Endpoint getEndpoint() const;
 

@@ -46,7 +46,7 @@ void SongbirdUDP::startAsyncReadLoop() {
         if (!ec && bytesTransferred > 0) {
             // get last remote endpoint via member
             boost::asio::ip::udp::endpoint ep = this->lastRemoteEndpoint;
-            proto->parseData(buf->data(), bytesTransferred, IStream::Endpoint{ep.address(), ep.port()});
+            proto->parseData(buf->data(), bytesTransferred, Endpoint{ep.address(), ep.port()});
         } else if (ec) {
             std::cerr << "UDP receive error: " << ec.message() << std::endl;
         }
@@ -141,8 +141,7 @@ bool SongbirdUDP::listenMulticast(const boost::asio::ip::address& addr, uint16_t
 }
 
 void SongbirdUDP::setEndpoint(const boost::asio::ip::address &addr, uint16_t port, bool bind) {
-    endpoint.ip = addr;
-    endpoint.port = port;
+    endpoint = Endpoint{addr, port};
     broadcastMode = false;
     bindMode = bind;
 
@@ -222,7 +221,11 @@ void SongbirdUDP::write(const uint8_t* buffer, std::size_t length, const IStream
         write(buffer, length);
         return;
     }
-	boost::asio::ip::udp::endpoint udpEndpoint(target.ip, target.port);
+    const std::string targetText = target.toString();
+    const auto separator = targetText.rfind(':');
+    boost::asio::ip::udp::endpoint udpEndpoint(
+        boost::asio::ip::make_address(targetText.substr(0, separator)),
+        static_cast<uint16_t>(std::stoul(targetText.substr(separator + 1))));
     socket->async_send_to(boost::asio::buffer(buffer, length), udpEndpoint, [](const boost::system::error_code& ec, std::size_t /*bytes*/) {
         if (ec) std::cerr << "UDP send error: " << ec.message() << std::endl;
         });

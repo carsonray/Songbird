@@ -25,7 +25,7 @@ def main():
     # Set up server to echo messages
     def server_handler(pkt):
         print(f"Server received: Header={hex(pkt.get_header())}, "
-              f"From={pkt.get_endpoint().ip}:{pkt.get_endpoint().port}")
+              f"From={pkt.get_endpoint().to_string()}")
         
         # Echo back
         response = server_core.create_packet(pkt.get_header())

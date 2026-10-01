@@ -1,3 +1,7 @@
+            String endpointText = String(packet.getEndpoint().toString().c_str());
+    Serial.print(endpoint.toString().c_str());
+    Serial.print(entry.first.toString().c_str());
+    if (endpoint == IStream::Endpoint{}) {
 #include <Arduino.h>
 #include "SongbirdCore.h"
 
@@ -75,11 +79,6 @@ std::size_t SongbirdCore::Packet::getPayloadLength() const {
 
 std::size_t SongbirdCore::Packet::getRemainingBytes() const {
     return payload.size() - readPos;
-}
-
-void SongbirdCore::Packet::setEndpoint(const IPAddress& ip, uint16_t port) {
-    endpoint.ip = ip;
-    endpoint.port = port;
 }
 
 void SongbirdCore::Packet::setEndpoint(const IStream::Endpoint& value) {
@@ -287,7 +286,7 @@ void SongbirdCore::logPacket(LogEvent event, const Packet& packet, const char* r
         shouldLog = (logging.events & event) != 0;
         rateEnabled = (logging.events & LOG_RATE) != 0;
         if (shouldLog) {
-            String endpointText = packet.getEndpoint().ip.toString() + ":" + String(packet.getEndpoint().port);
+            String endpointText = String(packet.getEndpoint().toString().c_str());
             Serial.print("["); Serial.print(name.c_str()); Serial.print("] ");
             Serial.print(logEventName(event));
             Serial.print(" header="); Serial.print(packet.getHeader());
@@ -308,7 +307,7 @@ void SongbirdCore::logTimeout(const IStream::Endpoint& endpoint) {
         (logging.filterEndpoint && !(endpoint == logging.endpoint)) || logging.filterHeader) return;
     Serial.print("["); Serial.print(name.c_str());
     Serial.print("] DROPPED header=? seq=? guaranteed=? payload=? endpoint=");
-    Serial.print(endpoint.ip.toString()); Serial.print(":"); Serial.print(endpoint.port);
+    Serial.print(endpoint.toString().c_str());
     Serial.println(" reason=timeout");
 }
 
@@ -326,7 +325,7 @@ void SongbirdCore::logRatesIfDue() {
     }
     for (const auto& entry : endpointLogTracks) {
         Serial.print("["); Serial.print(name.c_str()); Serial.print("] RATE endpoint=");
-        Serial.print(entry.first.ip.toString()); Serial.print(":"); Serial.print(entry.first.port);
+        Serial.print(entry.first.toString().c_str());
         Serial.print(" sent="); Serial.print(entry.second.sent);
         Serial.print(" received="); Serial.print(entry.second.received);
         Serial.print(" pps="); Serial.println((entry.second.sent + entry.second.received) * 1000UL / elapsed);
@@ -476,8 +475,8 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guarante
     // Write directly to stream in both modes
     std::vector<uint8_t> bytes = packet.toBytes(processMode, reliableMode);
     IStream::Endpoint endpoint = packet.getEndpoint();
-    if (endpoint.port == 0) {
-        endpoint = stream->getEndpoint().getDefault();
+    if (endpoint == IStream::Endpoint{}) {
+        endpoint = stream->getEndpoint();
         packet.setEndpoint(endpoint);
     }
     stream->write(bytes.data(), bytes.size(), endpoint);

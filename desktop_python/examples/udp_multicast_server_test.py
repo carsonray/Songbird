@@ -25,8 +25,8 @@ def main():
     
     # Set handler for identification messages
     def id_handler(pkt):
-        endpoint_ip = pkt.get_endpoint().ip
-        print(f"New multicast member at IP address {endpoint_ip}")
+        endpoint = pkt.get_endpoint().to_string()
+        print(f"New multicast member at {endpoint}")
     
     core.set_header_handler(0x02, id_handler)
     

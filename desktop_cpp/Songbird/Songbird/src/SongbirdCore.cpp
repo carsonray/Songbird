@@ -95,11 +95,6 @@ std::size_t SongbirdCore::Packet::getRemainingBytes() const {
     return payload.size() - readPos;
 }
 
-void SongbirdCore::Packet::setEndpoint(const boost::asio::ip::address& ip, uint16_t port) {
-    endpoint.ip = ip;
-    endpoint.port = port;
-}
-
 void SongbirdCore::Packet::setEndpoint(const IStream::Endpoint& value) {
     endpoint = value;
 }
@@ -318,7 +313,7 @@ const char* SongbirdCore::logEventName(LogEvent event) {
 }
 
 std::string SongbirdCore::endpointString(const IStream::Endpoint& endpoint) {
-    return endpoint.ip.to_string() + ":" + std::to_string(endpoint.port);
+    return endpoint.toString();
 }
 
 void SongbirdCore::logPacket(LogEvent event, const Packet& packet, const char* reason) {
@@ -545,8 +540,8 @@ void SongbirdCore::sendPacket(Packet& packet, uint8_t sequenceNum, bool guarante
     // Write directly to stream in both modes
     std::vector<uint8_t> bytes = packet.toBytes(processMode, reliableMode);
     IStream::Endpoint endpoint = packet.getEndpoint();
-    if (endpoint.port == 0) {
-        endpoint = stream->getEndpoint().getDefault();
+    if (endpoint == IStream::Endpoint{}) {
+        endpoint = stream->getEndpoint();
         packet.setEndpoint(endpoint);
     }
     stream->write(bytes.data(), bytes.size(), endpoint);

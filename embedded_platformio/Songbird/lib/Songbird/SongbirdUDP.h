@@ -13,29 +13,26 @@
 
 class SongbirdUDP : public IStream {
 public:
-    class Endpoint {
-        public:
-            Endpoint() : ip(0, 0, 0, 0), port(0) {}
-            Endpoint(const IPAddress& ip, uint16_t port) : ip(ip), port(port) {}
+    class Endpoint : public IStream::Endpoint {
+    public:
+        Endpoint() : IStream::Endpoint(), ip(0, 0, 0, 0), port(0) {}
+        Endpoint(const IPAddress& ip, uint16_t port)
+            : IStream::Endpoint(std::string(ip.toString().c_str()) + ":" + std::to_string(port)), ip(ip), port(port) {}
 
-            bool operator==(const Endpoint& other) const {
-                return (ip == other.ip) && (port == other.port);
-            };
+        std::string toString() const {
+            return IStream::Endpoint::toString();
+        }
 
-            bool operator!=(const Endpoint& other) const {
-                return !(*this == other);
-            };
+        bool operator==(const Endpoint& other) const {
+            return (ip == other.ip) && (port == other.port);
+        }
 
-            virtual Endpoint getDefault() const {
-                return Endpoint{IPAddress(0, 0, 0, 0), 0};
-            };
+        bool operator!=(const Endpoint& other) const {
+            return !(*this == other);
+        }
 
-            virtual std::string toString() const {
-                return ip.toString() + ":" + std::to_string(port);
-            };
-        private:
-            IPAddress ip;
-            uint16_t port;
+        IPAddress ip;
+        uint16_t port;
     };
 
     SongbirdUDP(std::string name);
@@ -61,7 +58,7 @@ public:
     bool isMulticast();
     bool isBound();
 
-    Endpoint getEndpoint() const override;
+    IStream::Endpoint getEndpoint() const override;
     // Gets local port
     uint16_t getLocalPort();
     std::shared_ptr<SongbirdCore> getProtocol();
@@ -71,7 +68,7 @@ public:
     bool isOpen() const override;
     void close() override;
     void updateData() override { update(); }
-    void write(const uint8_t* buffer, std::size_t length, const Endpoint& endpoint) override;
+    void write(const uint8_t* buffer, std::size_t length, const IStream::Endpoint& endpoint) override;
 
 private:
     std::shared_ptr<SongbirdCore> protocol;

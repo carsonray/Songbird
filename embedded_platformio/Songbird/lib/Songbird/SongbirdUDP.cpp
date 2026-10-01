@@ -13,7 +13,7 @@ SongbirdUDP::SongbirdUDP(std::string name)
     protocol->setRetransmitTimeout(100); // Short timeout for UDP
     udp.onPacket([this](AsyncUDPPacket packet) {
         // Parse received data with protocol
-        protocol->parseData(packet.data(), packet.length(), IStream::Endpoint{packet.remoteIP(), packet.remotePort()});
+        protocol->parseData(packet.data(), packet.length(), Endpoint{packet.remoteIP(), packet.remotePort()});
     });
 }
 
@@ -40,7 +40,7 @@ bool SongbirdUDP::listenMulticast(const IPAddress &addr, uint16_t port) {
 
 bool SongbirdUDP::setEndpoint(const IPAddress &addr, uint16_t port, bool bind) {
     // Attempts to connect to remote
-    endpoint = new Endpoint(addr, port);
+    endpoint = SongbirdUDP::Endpoint(addr, port);
     broadcastMode = false;
     bindMode = bind;
     if (bind) {
@@ -52,9 +52,9 @@ bool SongbirdUDP::setEndpoint(const IPAddress &addr, uint16_t port, bool bind) {
 void SongbirdUDP::setBroadcastMode(bool mode) {
     this->broadcastMode = mode;
 }
-
 IStream::Endpoint SongbirdUDP::getEndpoint() const {
-    return endpoint;
+    // Gets generic endpoint from string representation
+    return IStream::Endpoint(endpoint.toString().c_str());
 }
 uint16_t SongbirdUDP::getLocalPort() {
     return localPort;
@@ -98,7 +98,12 @@ void SongbirdUDP::write(const uint8_t* buffer, std::size_t length, const IStream
         write(buffer, length);
         return;
     }
-    udp.writeTo(const_cast<uint8_t*>(buffer), length, target.ip, target.port);
+    String endpointText = String(target.toString().c_str());
+    int separator = endpointText.lastIndexOf(':');
+    IPAddress targetIp;
+    targetIp.fromString(endpointText.substring(0, separator));
+    uint16_t targetPort = static_cast<uint16_t>(endpointText.substring(separator + 1).toInt());
+    udp.writeTo(const_cast<uint8_t*>(buffer), length, targetIp, targetPort);
 }
 
 void SongbirdUDP::close() {

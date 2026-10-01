@@ -3,18 +3,29 @@
 
 #include <boost/asio.hpp>
 #include <string>
+#include <utility>
 
 class IStream {
 public:
     class Endpoint {
     public:
-        virtual bool operator==(const Endpoint& other);
+        Endpoint() = default;
+        explicit Endpoint(std::string value) : value(std::move(value)) {}
 
-        virtual bool operator!=(const Endpoint& other);
+        bool operator==(const Endpoint& other) const {
+            return value == other.value;
+        }
 
-        virtual Endpoint getDefault();
+        bool operator!=(const Endpoint& other) const {
+            return !(*this == other);
+        }
 
-        virtual std::string toString();
+        std::string toString() const {
+            return value;
+        }
+
+    private:
+        std::string value;
     };
 
     virtual ~IStream() = default;
